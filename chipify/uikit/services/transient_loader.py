@@ -202,7 +202,8 @@ def resolve_analysis_dir(df: pd.DataFrame, out_dir: str | os.PathLike[str],
     3. *meta* — a run_meta sidecar dict for the loaded history run
        (``analysis_dirs`` / legacy ``tran_dir`` keys). Checked before the
        pointer files so an older history run resolves to its own data, not
-       the most recent run's.
+       the most recent run's. Relative entries are taken relative to
+       *out_dir*, the run's output root.
     4. ``{out_dir}/analysis_data/{kind}/.latest`` pointer file (and the
        legacy ``{out_dir}/tran_data/.latest`` for transient).
     5. Newest sub-directory under ``{out_dir}/analysis_data/{kind}/``.
@@ -226,13 +227,16 @@ def resolve_analysis_dir(df: pd.DataFrame, out_dir: str | os.PathLike[str],
     # 3. History run's meta sidecar.
     if isinstance(meta, dict):
         meta_adirs = meta.get("analysis_dirs", {})
-        d = str(meta_adirs.get(kind, "") or "") if isinstance(meta_adirs, dict) else ""
-        if d and Path(d).is_dir():
-            return d
+        candidates = [str(meta_adirs.get(kind, "") or "")
+                      if isinstance(meta_adirs, dict) else ""]
         if kind == "transient":
-            d = str(meta.get("tran_dir", "") or "")
-            if d and Path(d).is_dir():
-                return d
+            candidates.append(str(meta.get("tran_dir", "") or ""))
+        for d in candidates:
+            if not d:
+                continue
+            p = Path(d) if Path(d).is_absolute() else out_path / d
+            if p.is_dir():
+                return str(p)
 
     # 4. Pointer files.
     pointers = [out_path / "analysis_data" / kind / ".latest"]

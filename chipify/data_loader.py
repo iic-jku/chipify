@@ -366,8 +366,23 @@ def resolve_csv_path(selection: str, out_dir: str | os.PathLike[str]) -> str | N
 
 
 def load_csv(csv_path: str) -> pd.DataFrame:
-    """Read a simulation result CSV and apply error-column normalisation."""
-    return prepare_results(pd.read_csv(csv_path))
+    """Read a simulation result CSV and apply error-column normalisation.
+
+    The run's waveform directories are restored from its ``.meta.json``
+    sidecar into ``df.attrs["analysis_dirs"]`` (and ``tran_dir``), exactly as
+    ``run_sim`` sets them on a live run. Without that, a reloaded history run
+    fell back to the ``.latest`` pointer and showed the *newest* run's
+    waveforms next to its own measurements.
+    """
+    from chipify import run_meta
+
+    df = prepare_results(pd.read_csv(csv_path))
+    analysis_dirs = run_meta.analysis_dirs_for(csv_path)
+    if analysis_dirs:
+        df.attrs["analysis_dirs"] = analysis_dirs
+        if analysis_dirs.get("transient"):
+            df.attrs["tran_dir"] = analysis_dirs["transient"]
+    return df
 
 
 def list_history_runs(out_dir: str | os.PathLike[str],

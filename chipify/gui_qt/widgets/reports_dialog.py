@@ -199,6 +199,14 @@ class ReportsDialog(QDialog):
         self.chk_md.setChecked(self._config.markdown)
         drow2.addWidget(self.chk_pdf)
         drow2.addWidget(self.chk_md)
+        drow2.addSpacing(20)
+        drow2.addWidget(QLabel("Plots per PDF page"))
+        self.per_page_combo = QComboBox()
+        self.per_page_combo.addItems(["1", "2"])
+        self.per_page_combo.setToolTip(
+            "2 stacks two plots on each portrait page, each at reduced height.")
+        self.per_page_combo.setCurrentText(str(self._config.plots_per_page))
+        drow2.addWidget(self.per_page_combo)
         drow2.addStretch(1)
         root.addWidget(docs)
 
@@ -412,6 +420,7 @@ class ReportsDialog(QDialog):
         self._config.formats = [f for f, b in self.format_checks.items() if b.isChecked()]
         self._config.pdf = self.chk_pdf.isChecked()
         self._config.markdown = self.chk_md.isChecked()
+        self._config.plots_per_page = int(self.per_page_combo.currentText())
         return self._config
 
     def _write(self) -> bool:

@@ -200,6 +200,21 @@ def validate_parameters(params_raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _validate_description(data: dict[str, Any]) -> str:
+    """The datasheet's optional one-line ``description:``.
+
+    Shown on the report cover and on the batch report's summary page, so it is
+    collapsed to a single line: a YAML block scalar would otherwise carry its
+    line breaks into a table cell.
+    """
+    raw = data.get("description")
+    if raw is None:
+        return ""
+    if isinstance(raw, (dict, list)):
+        raise SchemaError(f"description: expected text, got {type(raw).__name__}")
+    return " ".join(str(raw).split())
+
+
 def _validate_equations(data: dict[str, Any], key: str) -> list[dict[str, str]]:
     """Validate a top-level equations block into ``[{"name", "expr"}]`` form.
 
@@ -277,10 +292,20 @@ def _validate_reports(data: dict[str, Any]) -> "Any":
                 out.append(name)
         return out
 
+    per_page = raw.get("plots_per_page")
+    if per_page is None:
+        per_page = 1
+    # bool is an int subclass: `plots_per_page: true` must not read as 1.
+    if isinstance(per_page, bool) or per_page not in (1, 2):
+        raise SchemaError(
+            f"reports.plots_per_page: expected 1 or 2, got {per_page!r}."
+        )
+
     cfg = ReportsConfig(
         formats=_formats(raw.get("formats"), "reports.formats"),
         pdf=bool(raw.get("pdf", False)),
         markdown=bool(raw.get("markdown", False)),
+        plots_per_page=int(per_page),
     )
 
     # Only an absent/null key defaults to "no plots": `plots: {}` is a typo for
@@ -379,6 +404,7 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
         raise SchemaError(f"Datasheet root must be a mapping, got {type(data).__name__}.")
 
     stim = Stimuli()
+    stim.description = _validate_description(data)
 
     # ── Parameters ────────────────────────────────────────────────────────────
     params_raw: dict[str, Any] = {}

@@ -411,6 +411,29 @@ def _open_editor_on(window, tmp_path, monkeypatch, text):
     return editor, ds
 
 
+def test_description_field_round_trips_through_the_datasheet(window, tmp_path, monkeypatch):
+    """The datasheet's description is editable from the form, like the rest."""
+    import yaml
+    from chipify.util import Stimuli
+
+    editor, ds = _open_editor_on(window, tmp_path, monkeypatch, _DATASHEET)
+    editor.mode_combo.blockSignals(True)
+    editor.mode_combo.setCurrentText("Form View")
+    editor.mode_combo.blockSignals(False)
+    editor._on_mode_change()
+    assert editor.desc_edit.text() == ""
+
+    editor.desc_edit.setText("loop gain and phase margin")
+    editor._save()
+    saved = yaml.safe_load(ds.read_text(encoding="utf-8"))
+    assert list(saved)[0] == "description"
+    assert Stimuli(ds).description == "loop gain and phase margin"
+
+    editor.desc_edit.setText("")
+    editor._save()
+    assert "description" not in yaml.safe_load(ds.read_text(encoding="utf-8"))
+
+
 def test_reports_dialog_round_trips_through_the_datasheet(window, tmp_path, monkeypatch):
     """Build a reports: block from scratch in the GUI and read it back."""
     import yaml
@@ -443,6 +466,24 @@ def test_reports_dialog_round_trips_through_the_datasheet(window, tmp_path, monk
     # Reopening shows what was saved.
     editor.current_yaml_data = block
     assert len(ReportsDialog(editor, window.app_state, editor)._config.plots) == 1
+
+
+def test_reports_dialog_sets_plots_per_page(window, tmp_path, monkeypatch):
+    import yaml
+    from chipify.gui_qt.widgets.reports_dialog import ReportsDialog
+    from chipify.util import Stimuli
+
+    editor, ds = _open_editor_on(window, tmp_path, monkeypatch, _DATASHEET)
+    dlg = ReportsDialog(editor, window.app_state, editor)
+    assert dlg.per_page_combo.currentText() == "1"
+    dlg._add_plot()
+    dlg.chk_pdf.setChecked(True)
+    dlg.per_page_combo.setCurrentText("2")
+    assert dlg._write()
+    assert yaml.safe_load(ds.read_text(encoding="utf-8"))["reports"]["plots_per_page"] == 2
+    assert Stimuli(str(ds)).reports.plots_per_page == 2
+    reopened = ReportsDialog(editor, window.app_state, editor)
+    assert reopened.per_page_combo.currentText() == "2"
 
 
 def test_reports_dialog_shown_defaults_are_the_stored_ones(window, tmp_path, monkeypatch):

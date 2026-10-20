@@ -1,0 +1,204 @@
+# Copyright (c) 2026 Santiago Hofwimmer
+"""``chipify-cli --batch``: per-datasheet isolation, the combined report and
+``--report-only``. ``simulator.run_sim`` is replaced by canned results, so no
+simulator is needed."""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from chipify import cli
+
+_DATASHEET = """
+description: {description}
+parameters:
+  temp: [-40, 27, 100]
+tests:
+  tb:
+    gain: {{min: 9, max: 11, unit: dB}}
+    transient_signals: [outp]
+reports:
+  pdf: true
+"""
+
+
+def _results() -> pd.DataFrame:
+    return pd.DataFrame({
+        "temp": [-40, 27, 100],
+        "run_id": ["000000", "000001", "000002"],
+        "sim_error": ["None"] * 3,
+        "tb__error": ["None"] * 3,
+        "tb_overall_pass": [True] * 3,
+        "gain": [10.0, 10.2, 9.8],
+        "gain_pass": [True] * 3,
+    })
+
+
+@pytest.fixture
+def project(tmp_path, monkeypatch):
+    """Two datasheets in tmp_path/datasheets, output in tmp_path/out."""
+    from chipify import app_config, project_config, run_meta, settings, simulator
+
+    batch = tmp_path / "datasheets"
+    batch.mkdir()
+    for name in ("alpha", "beta"):
+        (batch / f"{name}.yaml").write_text(
+            _DATASHEET.format(description=f"{name} checks"), encoding="utf-8")
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path / "out"))
+    monkeypatch.setattr(project_config, "PROJECT_FILE", tmp_path / "project.yaml")
+    # Keep the real out/chipify.log and the version probes out of the test.
+    monkeypatch.setattr(app_config, "setup_logging", lambda **_k: None)
+    for probe in ("_ngspice_version", "_vacask_version", "_git_commit"):
+        monkeypatch.setattr(run_meta, probe, lambda: "")
+
+    calls = []
+
+    def fake_run_sim(stim, *, out_dir=None, **_kw):
+        calls.append(Path(out_dir))
+        df = _results()
+        df.attrs["analysis_dirs"] = simulator._create_analysis_dirs(stim, out_dir)
+        return df
+
+    monkeypatch.setattr(simulator, "run_sim", fake_run_sim)
+    return {"root": tmp_path, "batch": batch, "out": tmp_path / "out",
+            "calls": calls}
+
+
+def _main(monkeypatch, capsys, *argv) -> tuple[int, list[dict]]:
+    """Run the CLI; return its exit code and the JSON lines it printed."""
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", *argv])
+    code = 0
+    try:
+        cli.main()
+    except SystemExit as exc:
+        code = exc.code or 0
+    lines = capsys.readouterr().out.splitlines()
+    return code, [json.loads(l) for l in lines if l.startswith("{")]
+
+
+def _outline_titles(pdf_path) -> list[str]:
+    from pypdf import PdfReader
+    return [item.title for item in PdfReader(str(pdf_path)).outline]
+
+
+def test_batch_reports_write_one_combined_pdf(project, monkeypatch, capsys):
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--reports", "--json")
+    assert code == 0
+    batch = lines[-1]
+    assert [s["yaml"] for s in batch["batch_summary"]] == ["alpha.yaml", "beta.yaml"]
+    combined = Path(batch["combined_report"])
+    assert combined.is_file()
+    assert combined.parent.parent == project["out"] / "reports"
+    assert _outline_titles(combined) == ["Summary", "alpha", "beta"]
+    # Every datasheet still has its own report next to its results.
+    for s in batch["batch_summary"]:
+        assert Path(s["reports_dir"]).parent.parent.parent == project["out"]
+
+
+def test_each_datasheet_keeps_its_own_waveforms(project, monkeypatch, capsys):
+    """Run ids restart at 000000 per datasheet, so a shared waveform folder
+    let two datasheets on one testbench read each other's curves."""
+    from chipify import run_meta
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert project["calls"] == [project["out"] / "alpha", project["out"] / "beta"]
+    for name in ("alpha", "beta"):
+        root = project["out"] / name
+        pointer = root / "analysis_data" / "transient" / ".latest"
+        assert Path(pointer.read_text(encoding="utf-8")).parent.parent.parent == root
+        hist = next((root / "history").glob("run_*.csv"))
+        stored = run_meta.read_meta(hist)["analysis_dirs"]["transient"]
+        assert stored.startswith("analysis_data/transient/")  # relative to root
+    assert not (project["out"] / "analysis_data").exists()
+
+
+def test_a_failed_datasheet_fails_the_batch_but_stays_in_the_report(
+        project, monkeypatch, capsys):
+    from chipify import simulator
+
+    real = simulator.run_sim
+
+    def flaky(stim, **kw):
+        if Path(kw["out_dir"]).name == "alpha":
+            raise RuntimeError("netlist failed")
+        return real(stim, **kw)
+
+    monkeypatch.setattr(simulator, "run_sim", flaky)
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--reports", "--json")
+    assert code == 1
+    assert lines[-1]["batch_summary"][0] == {"yaml": "alpha.yaml", "error": "no data"}
+    assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "beta"]
+
+
+def test_report_only_rebuilds_from_finished_runs(project, monkeypatch, capsys):
+    from chipify import simulator
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("--report-only must not simulate")
+
+    monkeypatch.setattr(simulator, "run_sim", must_not_run)
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--report-only", "--json")
+    assert code == 0
+    per_datasheet, batch = lines[:-1], lines[-1]
+    assert [s["total"] for s in per_datasheet] == [3, 3]
+    assert all(Path(s["reports_dir"]).is_dir() for s in per_datasheet)
+    assert _outline_titles(batch["combined_report"]) == ["Summary", "alpha", "beta"]
+
+
+def test_report_only_without_a_finished_run_fails(project, monkeypatch, capsys):
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--report-only", "--json")
+    assert code == 1
+    assert lines[-1]["batch_summary"][0]["error"] == "no finished run"
+
+
+def test_datasheet_order_from_project_yaml(project, monkeypatch, capsys):
+    (project["root"] / "project.yaml").write_text(
+        "name: bias chain\ndatasheet_order: [beta.yaml]\n", encoding="utf-8")
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--reports", "--json")
+    assert code == 0
+    assert [s["yaml"] for s in lines[-1]["batch_summary"]] == ["beta.yaml", "alpha.yaml"]
+    assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "beta", "alpha"]
+
+
+def test_order_datasheets_accepts_names_and_stems(tmp_path, caplog):
+    from chipify import project_config
+
+    paths = [tmp_path / n for n in ("c.yaml", "a.yaml", "b.yaml")]
+    ordered = project_config.order_datasheets(paths, ["b", "c.yaml", "zzz.yaml"])
+    assert [p.name for p in ordered] == ["b.yaml", "c.yaml", "a.yaml"]
+    assert "zzz.yaml" in caplog.text
+
+
+def test_cli_pins_the_agg_backend():
+    """With DISPLAY set and PySide6 installed matplotlib picks QtAgg, and the
+    CLI hung in Qt before the PDF was written. A fresh interpreter, because
+    other tests have already selected Agg in this one."""
+    code = textwrap.dedent("""
+        import sys, matplotlib
+        from chipify import cli
+        sys.argv = ["chipify-cli", "--version"]
+        try:
+            cli.main()
+        except SystemExit:
+            pass
+        print("BACKEND=" + matplotlib.get_backend())
+    """)
+    env = dict(os.environ, MPLBACKEND="QtAgg")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, env=env, timeout=120,
+                         cwd=Path(__file__).resolve().parent.parent)
+    assert "backend=agg" in out.stdout.lower(), out.stdout + out.stderr

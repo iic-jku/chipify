@@ -161,6 +161,9 @@ class ReportsConfig:
     pdf: bool = False
     markdown: bool = False
     plots: list[PlotSpec] = field(default_factory=list)
+    #: Configured plots per PDF page: 1 (full band) or 2 (stacked, each at
+    #: reduced height). Only shapes the PDF; image exports are unaffected.
+    plots_per_page: int = 1
 
     def __bool__(self) -> bool:
         """True when the block asks for anything at all."""

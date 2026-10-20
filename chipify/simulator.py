@@ -544,14 +544,18 @@ def _assemble_result_df(rows: list, analysis_dirs: dict) -> pd.DataFrame:
     return df
 
 
-def write_analysis_pointers(analysis_dirs: dict) -> None:
+def write_analysis_pointers(analysis_dirs: dict, out_dir=None) -> None:
     """Record each kind's latest data directory in ``analysis_data/<kind>/.latest``.
 
     The GUI's analysis-dir resolution reads these pointer files after a
     restart; the legacy ``tran_data/.latest`` pointer is also kept for
     transient so older consumers keep working.
+
+    *out_dir* is the run's output root (default ``settings.OUT_DIR``). Batch
+    mode passes each datasheet's own folder, so a pointer only ever names a
+    directory of the datasheet it sits next to.
     """
-    out_dir = Path(settings.OUT_DIR)
+    out_dir = Path(out_dir or settings.OUT_DIR)
     for kind, d in (analysis_dirs or {}).items():
         if not d:
             continue
@@ -566,10 +570,34 @@ def write_analysis_pointers(analysis_dirs: dict) -> None:
                 log.warning("Could not write %s pointer %s: %s", kind, ptr, exc)
 
 
+def _create_analysis_dirs(stim, out_dir) -> dict[str, str]:
+    """Create ``<out_dir>/analysis_data/<kind>/<timestamp>/`` per analysis kind.
+
+    Only kinds actually used by at least one test get a directory. Run ids
+    restart at ``000000`` for every run, so the directory is what keeps two
+    runs' ``run_<id>__<tb>.csv`` files apart — which is why it lives under the
+    run's own output root rather than one folder shared by every datasheet.
+    """
+    sim_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    analysis_dirs: dict[str, str] = {}
+    for kind in ("transient", "dc", "ac"):
+        if any(
+            any(a.kind == kind for a in getattr(t, "analyses", []) or [])
+            for t in stim.tests
+        ):
+            d = Path(out_dir) / "analysis_data" / kind / sim_timestamp
+            d.mkdir(parents=True, exist_ok=True)
+            # Stored as str: rides df.attrs and is JSON-serialised into the
+            # run's .meta.json sidecar.
+            analysis_dirs[kind] = str(d)
+            log.info("%s store: %s", kind, d)
+    return analysis_dirs
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
-            templates_dir: str = ""):
+            templates_dir: str = "", out_dir=None):
     """
     Main simulation entry point.
 
@@ -587,6 +615,9 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
     templates_dir:
         When set, skip xschem and load pre-rendered Jinja2 templates from
         this directory (see ``--templates-dir``) instead of regenerating them.
+    out_dir:
+        Output root that receives ``analysis_data/`` (default
+        ``settings.OUT_DIR``). Batch mode passes each datasheet's own folder.
 
     Returns
     -------
@@ -632,21 +663,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         # Assign a stable zero-padded run_id to every parameter case.
         run_ids = [f"{i:06d}" for i in range(len(param_sets))]
 
-        # Create one per-analysis directory under analysis_data/<kind>/<ts>/.
-        # Only kinds actually used by at least one test get a directory.
-        sim_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        analysis_dirs: dict[str, str] = {}
-        for kind in ("transient", "dc", "ac"):
-            if any(
-                any(a.kind == kind for a in getattr(t, "analyses", []) or [])
-                for t in stim.tests
-            ):
-                d = Path(settings.OUT_DIR) / "analysis_data" / kind / sim_timestamp
-                d.mkdir(parents=True, exist_ok=True)
-                # Stored as str: rides df.attrs and is JSON-serialised into the
-                # run's .meta.json sidecar.
-                analysis_dirs[kind] = str(d)
-                log.info("%s store: %s", kind, d)
+        analysis_dirs = _create_analysis_dirs(stim, out_dir or settings.OUT_DIR)
 
         results = []
         num_cores = cfg.get("num_cores") or util.get_num_cores()

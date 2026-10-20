@@ -16,12 +16,16 @@ Every plot is rendered independently: a spec naming a measurement this run does
 not have, or a waveform directory that was never produced, records a warning
 and the remaining plots are still written. A report run must never fail as a
 unit — the same reasoning that scoped simulation errors per testbench.
+
+A batch run gets one more document, :func:`generate_batch_report`: a summary
+page with one row per datasheet, followed by each datasheet's own PDF report.
 """
 from __future__ import annotations
 
 import datetime
 import logging
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +48,9 @@ class ReportResult:
     out_dir: Path
     files: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    #: The PDF report among ``files`` (None when none was written); the batch
+    #: report appends it rather than telling it apart from an exported plot.
+    pdf_report: Path | None = None
 
     @property
     def ok(self) -> bool:
@@ -270,9 +277,10 @@ def _write_documents(cfg: ReportsConfig, df, stim, yaml_path: str,
             from chipify import pdf_export
             # Pass the effective config, not stim.reports: a PDF-only run
             # overrides it, and the report must reflect what was asked for.
-            result.files.append(Path(pdf_export.generate_pdf_report(
+            result.pdf_report = Path(pdf_export.generate_pdf_report(
                 df, stim, yaml_path, str(out_dir), sim_duration_sec=duration_s,
-                reports_config=cfg, out_root=out_dir.parent.parent)))
+                reports_config=cfg, out_root=out_dir.parent.parent))
+            result.files.append(result.pdf_report)
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"PDF report failed ({exc})")
             log.warning("PDF report failed: %s", exc)
@@ -351,4 +359,134 @@ def generate_reports(df: pd.DataFrame, stim: Any, yaml_path: str,
 
     log.info("Reports written to %s (%d file(s), %d warning(s))",
              dest, len(result.files), len(result.warnings))
+    return result
+
+
+# ── Batch report ──────────────────────────────────────────────────────────────
+
+@dataclass
+class BatchEntry:
+    """One datasheet of a batch run, as the combined report needs it.
+
+    *out_dir* is the datasheet's own output root (``history/``,
+    ``analysis_data/``, ``reports/``). *df* is ``None`` when the datasheet
+    produced no results; *error* then says why. *reports* is what
+    :func:`generate_reports` wrote for it, if anything.
+    """
+
+    yaml_path: Path
+    out_dir: Path
+    df: pd.DataFrame | None = None
+    stim: Any = None
+    duration_s: float | None = None
+    summary: dict = field(default_factory=dict)
+    reports: ReportResult | None = None
+    error: str = ""
+
+    @property
+    def label(self) -> str:
+        return Path(self.yaml_path).stem
+
+
+def _entry_description(entry: BatchEntry) -> str:
+    if entry.stim is not None:
+        return str(getattr(entry.stim, "description", "") or "")
+    try:  # a run that failed still has a datasheet worth describing
+        from chipify.util import Stimuli
+        return Stimuli(entry.yaml_path).description
+    except Exception:  # noqa: BLE001 — the summary row must not fail on it
+        return ""
+
+
+def _entry_section_pdf(entry: BatchEntry, prepared: pd.DataFrame,
+                       scratch: Path, result: ReportResult) -> str | None:
+    """The datasheet's report PDF, rendering one only if it has none yet."""
+    if entry.reports is not None and entry.reports.pdf_report is not None \
+            and entry.reports.pdf_report.exists():
+        return str(entry.reports.pdf_report)
+    # The datasheet's own reports did not include a PDF. Render one for the
+    # combined report only, so its configured outputs stay exactly as declared.
+    try:
+        from chipify import pdf_export
+        return pdf_export.generate_pdf_report(
+            prepared, entry.stim, str(entry.yaml_path), str(scratch / entry.label),
+            sim_duration_sec=entry.duration_s,
+            reports_config=getattr(entry.stim, "reports", None),
+            out_root=entry.out_dir)
+    except Exception as exc:  # noqa: BLE001 — one datasheet must not sink the rest
+        result.warnings.append(f"{entry.label}: report section failed ({exc})")
+        log.warning("Batch report section %r failed: %s", entry.label, exc)
+        return None
+
+
+def _batch_section(entry: BatchEntry, scratch: Path, result: ReportResult) -> Any:
+    from chipify import pdf_export
+    from chipify.uikit.services import measurements as _meas
+
+    section = pdf_export.BatchSection(label=entry.label,
+                                      description=_entry_description(entry),
+                                      duration_s=entry.duration_s)
+    if entry.df is None:
+        section.error = entry.error or "no data"
+        return section
+    prepared = _dl.prepare_results(entry.df)
+    # The same numbers as the datasheet's own cover page.
+    summary = _dl.result_summary(prepared)
+    section.total, section.valid = summary.total, summary.valid
+    section.passed, section.yield_pct = summary.passed, summary.yield_pct
+    rows = _meas.measurement_rows(prepared, entry.stim)
+    section.failing = [r.name for r in rows if r.status == _meas.STATUS_FAIL]
+    section.erroring = [r.name for r in rows if r.status == _meas.STATUS_ERROR]
+    section.pdf_path = _entry_section_pdf(entry, prepared, scratch, result)
+    return section
+
+
+def generate_batch_report(entries: list[BatchEntry], out_dir: str | Path, *,
+                          title: str | None = None,
+                          subtitle: str | None = None) -> ReportResult:
+    """One PDF for a whole batch: a summary page, then every datasheet's report.
+
+    Writes ``<out_dir>/reports/<timestamp>/batch_report_<timestamp>.pdf`` and
+    points ``<out_dir>/reports/.latest`` at that folder, the convention
+    :func:`generate_reports` uses for a single datasheet. Each datasheet's own
+    PDF (``entry.reports``) is appended unchanged; one that has none is
+    rendered for the combined report only.
+
+    *title* defaults to ``name`` in ``project.yaml``, else the project folder's
+    name; *subtitle* to ``description`` in ``project.yaml``, else
+    "Chipify characterization report".
+    """
+    from chipify import pdf_export, project_config, settings
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = reports_dir(out_dir) / stamp
+    result = ReportResult(out_dir=dest)
+    if not entries:
+        result.warnings.append("No datasheets, so there is no batch report.")
+        return result
+
+    project = project_config.load()
+    if title is None:
+        title = str(project.get("name") or Path(settings.PROJECT_ROOT).name)
+    if subtitle is None:
+        subtitle = str(project.get("description")
+                       or "Chipify characterization report")
+
+    dest.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="chipify_batch_") as scratch:
+        sections = [_batch_section(e, Path(scratch), result) for e in entries]
+        try:
+            path = pdf_export.generate_batch_pdf(
+                sections, dest / f"batch_report_{stamp}.pdf",
+                title=title, subtitle=subtitle)
+            result.pdf_report = Path(path)
+            result.files.append(result.pdf_report)
+        except Exception as exc:  # noqa: BLE001
+            result.warnings.append(f"Batch PDF report failed ({exc})")
+            log.warning("Batch PDF report failed: %s", exc)
+
+    try:
+        (reports_dir(out_dir) / ".latest").write_text(str(dest), encoding="utf-8")
+    except OSError as exc:
+        result.warnings.append(f"Could not write the .latest pointer ({exc})")
     return result

@@ -161,8 +161,19 @@ class DatasheetEditorTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         host = QWidget()
-        cols = QHBoxLayout(host)
+        page = QVBoxLayout(host)
+        desc_row = QHBoxLayout()
+        lbl_d = QLabel("DESCRIPTION")
+        lbl_d.setObjectName("Heading")
+        desc_row.addWidget(lbl_d)
+        self.desc_edit = QLineEdit()
+        self.desc_edit.setPlaceholderText(
+            "One line, shown on the report cover and the batch report's summary")
+        desc_row.addWidget(self.desc_edit, stretch=1)
+        page.addLayout(desc_row)
+        cols = QHBoxLayout()
         cols.setSpacing(10)
+        page.addLayout(cols, stretch=1)
 
         # Left: parameters
         left = QVBoxLayout()
@@ -246,6 +257,7 @@ class DatasheetEditorTab(QWidget):
         self.test_vars = []
         self.param_key, params = _ye.get_params_dict(self.current_yaml_data)
         self.test_key, tests = _ye.get_tests_dict(self.current_yaml_data)
+        self.desc_edit.setText(_ye.description_text(self.current_yaml_data))
 
         self._param_box.addWidget(self._build_param_card(params))
         self._param_box.addStretch(1)
@@ -425,6 +437,8 @@ class DatasheetEditorTab(QWidget):
             self.current_yaml_data, self.param_key, self.test_key,
             self.param_vars, self.test_vars, QuotedString,
         )
+        self.current_yaml_data = _ye.set_description(
+            self.current_yaml_data, self.desc_edit.text())
 
     def _action_add_param(self) -> None:
         self._sync_to_state()

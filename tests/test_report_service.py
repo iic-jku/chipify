@@ -73,6 +73,8 @@ def test_full_block_parses():
     assert cfg.plots[0].formats == ["svg"]           # per-plot override
     assert cfg.plots[1].resolved_formats(cfg.formats) == ["png", "svg"]
     assert cfg.plots[2].options["signals"] == ["outp"]
+    assert cfg.plots_per_page == 1                   # default: one per page
+    assert _stim("reports:\n  plots_per_page: 2").reports.plots_per_page == 2
 
 
 @pytest.mark.parametrize("block,fragment", [
@@ -83,6 +85,9 @@ def test_full_block_parses():
     ("reports:\n  plots: [{type: scatter, y: pm}]", "requires 'x'"),
     ("reports:\n  plots: [{type: histogram, param: gain, bogus: 1}]", "unknown key"),
     ("reports:\n  formats: [tiff_nope]", "unknown format"),
+    ("reports:\n  plots_per_page: 3", "plots_per_page"),
+    ("reports:\n  plots_per_page: true", "plots_per_page"),
+    ("reports:\n  plots_per_page: '2'", "plots_per_page"),
 ])
 def test_invalid_blocks_name_the_offending_path(block, fragment):
     with pytest.raises(SchemaError) as exc:
@@ -490,6 +495,59 @@ def test_plot_axes_are_fitted_into_the_page_band(tmp_path):
     assert left + width <= 0.95, "band must leave room for colorbar labels"
 
 
+_THREE_PLOTS = """
+    reports:
+      pdf: true
+      plots_per_page: 2
+      plots:
+        - {type: histogram, param: gain, name: gain_hist}
+        - {type: scatter, x: gain, y: pm, name: gain_vs_pm}
+        - {type: tornado, target: gain, name: gain_tornado}
+"""
+
+
+def test_two_plots_per_page_stack_on_portrait_pages(tmp_path):
+    from pypdf import PdfReader
+
+    stim = _stim(_THREE_PLOTS)
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
+    pages = PdfReader(str(result.pdf_report)).pages
+    # cover + measurement table + ceil(3 / 2) plot pages.
+    assert len(pages) == 4
+    for page in pages:
+        width, height = float(page.mediabox.width), float(page.mediabox.height)
+        assert height > width, "every page stays portrait"
+    first, second = pages[2].extract_text(), pages[3].extract_text()
+    assert "Plots" in first and "(1 / 2)" in first
+    # Both plots really are on the page, not just their captions.
+    assert "gain_hist" in first and "Distribution of" in first
+    assert "gain_vs_pm" in first and "Shmoo" in first
+    assert "gain_tornado" in second and "Sensitivity" in second
+
+
+def test_two_up_slots_reduce_the_plot_height():
+    from chipify import pdf_export
+
+    page_band_h = pdf_export._PLOT_BAND[3] * pdf_export.A4[1]
+    slot_band_h = pdf_export._SLOT_BAND[3] * pdf_export._SLOT_H
+    assert slot_band_h < 0.75 * page_band_h
+    # Two slots fit between the banner and the bottom margin without overlap.
+    top, bottom = pdf_export._SLOT_TOPS
+    assert top <= 0.935 * pdf_export.A4[1] - 0.3
+    assert bottom <= top - pdf_export._SLOT_H - 0.3
+    assert bottom - pdf_export._SLOT_H >= 0.3
+
+
+def test_two_up_without_pypdf_falls_back_to_one_plot_per_page(tmp_path, monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pypdf", None)   # import raises ImportError
+    result = rs.generate_reports(_results(), _stim(_THREE_PLOTS), "d.yaml", tmp_path)
+    monkeypatch.undo()
+    from pypdf import PdfReader
+    assert len(PdfReader(str(result.pdf_report)).pages) == 2 + 3
+
+
 def test_page_header_banner_is_actually_drawn():
     """axis("off") also hides the patch, which left the banner invisible."""
     import matplotlib
@@ -506,3 +564,142 @@ def test_page_header_banner_is_actually_drawn():
         assert ax.get_xticks().size == 0 and ax.get_yticks().size == 0
     finally:
         plt.close(fig)
+
+
+# ── Datasheet description ─────────────────────────────────────────────────────
+
+def test_description_is_kept_on_one_line():
+    stim = _stim("""
+        description: |
+          loop gain, supply rejection
+          and noise
+    """)
+    assert stim.description == "loop gain, supply rejection and noise"
+    assert _stim().description == ""
+
+
+def test_description_must_be_text():
+    with pytest.raises(SchemaError, match="description"):
+        _stim("description: {a: 1}")
+
+
+def test_description_is_printed_on_the_cover(tmp_path):
+    from pypdf import PdfReader
+
+    stim = _stim("description: operating point of the bias chain")
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path,
+                                 config=rs.pdf_only_config())
+    cover = PdfReader(str(result.pdf_report)).pages[0].extract_text()
+    assert "operating point of the bias chain" in cover
+
+
+# ── Batch report ──────────────────────────────────────────────────────────────
+
+def _batch_entry(tmp_path, name, *, description="", pdf=True, df=None):
+    stim = _stim(f"description: {description}" if description else "")
+    out = tmp_path / name
+    entry = rs.BatchEntry(tmp_path / f"{name}.yaml", out,
+                          df=_results() if df is None else df, stim=stim,
+                          duration_s=90.0)
+    if pdf:
+        entry.reports = rs.generate_reports(entry.df, stim, str(entry.yaml_path),
+                                            out, config=rs.pdf_only_config())
+    return entry
+
+
+def _outline(reader):
+    return [(item.title, reader.get_destination_page_number(item))
+            for item in reader.outline]
+
+
+def test_batch_report_is_a_summary_then_each_datasheet_report(tmp_path):
+    from pypdf import PdfReader
+
+    from chipify import data_loader as _dl
+
+    entries = [_batch_entry(tmp_path, "op", description="operating point"),
+               _batch_entry(tmp_path, "ac", description="loop gain and noise")]
+    result = rs.generate_batch_report(entries, tmp_path, title="bandgap",
+                                      subtitle="IHP SG13CMOS5L")
+    assert not result.warnings, result.warnings
+    assert result.out_dir.parent == rs.reports_dir(tmp_path)
+    assert rs.latest_reports(tmp_path) == str(result.out_dir)
+
+    section_pages = [len(PdfReader(str(e.reports.pdf_report)).pages) for e in entries]
+    reader = PdfReader(str(result.pdf_report))
+    assert len(reader.pages) == 1 + sum(section_pages)
+    # One bookmark per datasheet, at the page the summary says it starts on.
+    assert _outline(reader) == [("Summary", 0), ("op", 1),
+                                ("ac", 1 + section_pages[0])]
+    # The datasheet's own report is appended unchanged.
+    first_cover = reader.pages[1].extract_text()
+    assert first_cover == PdfReader(str(entries[0].reports.pdf_report)).pages[0].extract_text()
+
+    summary = reader.pages[0].extract_text()
+    s = _dl.result_summary(_dl.prepare_results(_results()))
+    for text in ("bandgap", "IHP SG13CMOS5L", "operating point",
+                 "loop gain and noise", f"{s.yield_pct:.1f} %", "1.5 min"):
+        assert text in summary, text
+    assert f"op {s.total} {s.valid} {s.passed}" in summary
+    assert f"ac {s.total} {s.valid} {s.passed}" in summary
+    # Start pages printed in the table: op after the summary, ac after op.
+    assert summary.count(f"1.5 min {2 + section_pages[0]}") == 1
+
+
+def test_batch_report_renders_a_report_for_a_datasheet_without_one(tmp_path):
+    """A datasheet whose reports: block asks for no PDF still gets a section,
+    but nothing is added to its own output folder."""
+    from pypdf import PdfReader
+
+    entry = _batch_entry(tmp_path, "op", pdf=False)
+    result = rs.generate_batch_report([entry], tmp_path, title="t")
+    assert not result.warnings, result.warnings
+    reader = PdfReader(str(result.pdf_report))
+    assert len(reader.pages) > 1
+    assert _outline(reader) == [("Summary", 0), ("op", 1)]
+    assert not (tmp_path / "op").exists()
+
+
+def test_failed_datasheet_and_failing_measurements_are_on_the_summary(tmp_path):
+    from pypdf import PdfReader
+
+    failing = _results()
+    failing.loc[3, ["gain", "gain_pass", "tb_overall_pass"]] = [12.5, False, False]
+    entries = [_batch_entry(tmp_path, "op", df=failing),
+               rs.BatchEntry(tmp_path / "crashed.yaml", tmp_path / "crashed",
+                             error="no data")]
+    result = rs.generate_batch_report(entries, tmp_path, title="t")
+    reader = PdfReader(str(result.pdf_report))
+    # The crashed datasheet is listed but has no pages or bookmark.
+    assert [title for title, _ in _outline(reader)] == ["Summary", "op"]
+    summary = reader.pages[0].extract_text()
+    assert "75.0 %" in summary
+    assert "FAIL: gain" in summary
+    assert "no results (no data)" in summary
+
+
+def test_batch_summary_continues_on_further_pages(tmp_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from pypdf import PdfReader
+
+    from chipify import pdf_export
+
+    one_page = tmp_path / "one.pdf"
+    with PdfPages(one_page) as pdf:
+        fig = plt.figure(figsize=pdf_export.A4)
+        pdf.savefig(fig)
+        plt.close(fig)
+    sections = [pdf_export.BatchSection(f"ds{i:02d}", pdf_path=str(one_page),
+                                        total=4, valid=4, passed=4,
+                                        yield_pct=100.0, duration_s=60.0)
+                for i in range(40)]
+    path = pdf_export.generate_batch_pdf(sections, tmp_path / "b.pdf", title="t")
+    reader = PdfReader(path)
+    summary_pages = len(reader.pages) - len(sections)
+    assert summary_pages == 2
+    assert "Contents (continued)" in reader.pages[1].extract_text()
+    assert [s.start_page for s in sections] == list(range(3, 43))
+    assert _outline(reader)[1:] == [(f"ds{i:02d}", 2 + i) for i in range(40)]

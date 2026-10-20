@@ -9,6 +9,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Preparation for the initial public release.
 
 ### Added
+- `chipify-cli --batch DIR --reports` writes one combined PDF,
+  `out/reports/<timestamp>/batch_report_<timestamp>.pdf`: a summary page with
+  one row per datasheet (runs, valid, passed, yield, time, start page), the
+  datasheets' descriptions and failing measurements, then every datasheet's
+  own report, with one bookmark per datasheet. The `batch_summary` JSON line
+  gains `combined_report`. Title and subtitle come from `name` and
+  `description` in `project.yaml`; its new `datasheet_order` key sets the
+  batch order (by default, by file name).
+- `--report-only` writes the reports (and, with `--batch`, the combined PDF)
+  from each datasheet's newest finished run, without simulating again.
+- Datasheet `description:` key: one line shown on the report cover and on the
+  batch summary page, editable in the Datasheet Editor's form view.
+- `reports: plots_per_page: 2` puts two of the configured plots on each
+  portrait A4 page of the PDF report, each at reduced height (about 3.7 in
+  instead of 5.6 in), with the plot's name above it. Default stays one plot
+  per page. Also in the Reports dialog ("Plots per PDF page").
 - Hovering a curve in the **Plots** tab (and the dashboard's `Plots` cell)
   draws that curve thicker and fully opaque, and shows the run's details in
   the same tooltip the scatter plot uses: run id, the sample under the cursor,
@@ -57,6 +73,13 @@ Preparation for the initial public release.
   via `settings.json`, falling back to the default structure when unset.
 
 ### Changed
+- In `--batch` mode a datasheet's waveforms are written to
+  `out/<datasheet>/analysis_data/`, next to its results, instead of the shared
+  `out/analysis_data/`. Single-datasheet runs and the GUI are unchanged.
+- Run sidecars (`history/run_*.meta.json`) store `analysis_dirs` / `tran_dir`
+  relative to the output folder, so a moved or copied `out/` keeps its
+  waveforms. Older sidecars with absolute paths still load.
+- `pypdf` is now a dependency (it merges the batch report).
 - Persisted netlist templates (netlist export and `--templates-dir`) now carry
   absolute host paths for any include that was written relatively. They are
   project- and machine-specific; regenerate them after moving a project or
@@ -67,6 +90,15 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- `chipify-cli` could hang after writing a report's PNGs and before the PDF
+  existed when `DISPLAY`/`WAYLAND_DISPLAY` was set and PySide6 installed (e.g.
+  in IIC-OSIC-TOOLS): matplotlib picked the Qt backend. The CLI now pins Agg.
+- Batch datasheets shared one waveform folder per second and restarted their
+  run ids at `000000`, so two datasheets on the same testbench could overwrite
+  or read each other's waveforms without any error.
+- A history run loaded in the GUI (or for a report) showed the *newest* run's
+  waveforms: nothing restored the run's own waveform directories from its
+  sidecar. `data_loader.load_csv` now does.
 - A testbench referencing a macro or model file by a **relative** path failed
   while the same path written absolutely worked. Netlists are re-written into
   the RAM scratch dir before they run (ngspice executes from `FAST_TMP`, vacask

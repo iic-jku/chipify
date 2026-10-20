@@ -184,6 +184,8 @@ def config_to_reports(config: Any) -> dict[str, Any] | None:
         block["pdf"] = True
     if config.markdown:
         block["markdown"] = True
+    if config.plots_per_page != 1:
+        block["plots_per_page"] = config.plots_per_page
     plots: list[dict[str, Any]] = []
     for spec in config.plots:
         entry: dict[str, Any] = {"type": spec.type}
@@ -196,6 +198,31 @@ def config_to_reports(config: Any) -> dict[str, Any] | None:
     if plots:
         block["plots"] = plots
     return block or None
+
+
+def description_text(yaml_data: dict[str, Any]) -> str:
+    """The datasheet's ``description:`` as the one line the editor shows."""
+    return " ".join(str(yaml_data.get("description") or "").split())
+
+
+def set_description(yaml_data: dict[str, Any], text: str) -> dict[str, Any]:
+    """Apply the editor's description field to *yaml_data*; returns the dict.
+
+    Leaves the document alone when *text* says what it already says: a block
+    scalar shows as one line in the field, and writing that line back would
+    mark an unchanged datasheet as edited (and drop its comments on save).
+    Empty text removes the key; a new key goes first, above ``params:``.
+    """
+    text = " ".join(text.split())
+    if text == description_text(yaml_data):
+        return yaml_data
+    if not text:
+        yaml_data.pop("description", None)
+        return yaml_data
+    if "description" in yaml_data:
+        yaml_data["description"] = text
+        return yaml_data
+    return {"description": text, **yaml_data}
 
 
 def _set_bound(v_data: dict[str, Any], primary: str, alias: str, raw: str) -> None:

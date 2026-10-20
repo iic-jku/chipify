@@ -26,6 +26,8 @@ class Stimuli:
     def __init__(self, yaml_file: str | os.PathLike[str] | None = None) -> None:
         self.params: dict[str, Any] = {}
         self.tests: list[Test] = []
+        # One-line ``description:`` — report cover and batch summary page.
+        self.description: str = ""
         # Custom equations from the datasheet's top-level ``equations:`` /
         # ``transient_equations:`` blocks, as [{"name", "expr"}] dicts.
         self.equations: list[dict[str, str]] = []
@@ -56,6 +58,7 @@ class Stimuli:
 
         self.params = validated.params
         self.tests = validated.tests
+        self.description = getattr(validated, "description", "")
         self.equations = getattr(validated, "equations", [])
         self.transient_equations = getattr(validated, "transient_equations", [])
         self.reports = getattr(validated, "reports", self.reports)

@@ -26,8 +26,8 @@ def _json_summary(df, yaml_name: str, duration_s: float) -> dict:
     }
 
 
-def _generate_reports(df, stim, yaml_path, out_dir, duration_s) -> str:
-    """Write the datasheet's configured plots/reports; return the directory."""
+def _generate_reports(df, stim, yaml_path, out_dir, duration_s):
+    """Write the datasheet's configured plots/reports; return the ReportResult."""
     from chipify import report_service
 
     result = report_service.generate_reports(
@@ -38,7 +38,19 @@ def _generate_reports(df, stim, yaml_path, out_dir, duration_s) -> str:
         print(f"[!] {warning}")
     if result.files:
         print(f"[+] {len(result.files)} report file(s) in {result.out_dir}")
-    return str(result.out_dir)
+    return result
+
+
+def _write_markdown(entry, md_path) -> None:
+    """Write *entry*'s Markdown report; a failure is reported, not raised."""
+    try:
+        from chipify import md_export
+        md_path = Path(md_path)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_export.generate_md_report(entry.df, entry.stim, entry.yaml_path, md_path)
+        print(f"[+] Markdown report saved to {md_path}")
+    except Exception as exc:
+        print(f"[!] Markdown report failed for {entry.label}: {exc}")
 
 
 def _make_progress_stream_cb():
@@ -57,15 +69,21 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
                 templates_dir: str | None = None,
                 progress_stream: bool = False,
                 out_dir: str | os.PathLike[str] | None = None,
-                reports: bool = False) -> dict | None:
-    """Run simulation for one yaml file. Returns summary dict or None on failure.
+                reports: bool = False):
+    """Run simulation for one yaml file.
+
+    Returns a ``report_service.BatchEntry`` (results, datasheet, summary dict,
+    reports), or None on failure.
 
     out_dir:
-        Where to write simulation_results.csv and history/. Defaults to the
-        global OUT_DIR; batch mode passes a per-datasheet subdirectory so
-        consecutive runs don't overwrite each other.
+        Where to write simulation_results.csv, history/ and analysis_data/.
+        Defaults to the global OUT_DIR; batch mode passes a per-datasheet
+        subdirectory so consecutive runs don't overwrite or read each other's
+        results and waveforms.
     """
     import time
+    from chipify import report_service
+
     yaml_path = Path(yaml_path)
     print(f"[*] Loading configuration: {yaml_path.name}")
     out_dir = Path(out_dir) if out_dir else Path(settings.OUT_DIR)
@@ -79,6 +97,7 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
             simulator=simulator_override,
             templates_dir=templates_dir or "",
             progress_callback=progress_cb,
+            out_dir=out_dir,
         )
     except Exception as exc:
         # run_sim raises on unexpected failures and returns None only on abort,
@@ -97,7 +116,7 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
     print(f"[+] Results saved to {csv_out}")
 
     analysis_dirs = df.attrs.get("analysis_dirs", {}) or {}
-    simulator.write_analysis_pointers(analysis_dirs)
+    simulator.write_analysis_pointers(analysis_dirs, out_dir)
 
     # Save history copy + sidecar metadata
     try:
@@ -121,15 +140,59 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
     print_summary(df, stim)
 
     summary = _json_summary(df, yaml_path.name, duration_s)
+    entry = report_service.BatchEntry(yaml_path, out_dir, df=df, stim=stim,
+                                      duration_s=duration_s, summary=summary)
     if reports:
-        summary["reports_dir"] = _generate_reports(df, stim, yaml_path,
-                                                   out_dir, duration_s)
+        entry.reports = _generate_reports(df, stim, yaml_path, out_dir, duration_s)
+        summary["reports_dir"] = str(entry.reports.out_dir)
     if json_out:
         print(json.dumps(summary))
-    return summary
+    return entry
+
+
+def _load_finished_run(yaml_path: str | os.PathLike[str], *,
+                       out_dir: str | os.PathLike[str], json_out: bool = False):
+    """Load one datasheet's newest finished run and write its reports.
+
+    The ``--report-only`` counterpart of :func:`_run_single`: nothing is
+    simulated. Results, duration and waveform directories come from the newest
+    ``<out_dir>/history/run_*.csv`` recorded for this datasheet. Returns the
+    ``report_service.BatchEntry``, or None when there is no such run.
+    """
+    from chipify import data_loader as _dl
+    from chipify import report_service, run_meta
+
+    yaml_path, out_dir = Path(yaml_path), Path(out_dir)
+    print(f"[*] Loading finished run: {yaml_path.name}")
+    runs = [label for label in _dl.list_history_runs(out_dir, yaml_name=yaml_path.name)
+            if label.startswith("run_")]
+    if not runs:
+        print(f"[-] No finished run of {yaml_path.name} in {out_dir / 'history'}")
+        return None
+    csv_path = out_dir / "history" / runs[0]
+    df = _dl.load_csv(str(csv_path))  # also restores the run's waveform dirs
+    duration_s = run_meta.read_meta(csv_path).get("duration_s")
+    stim = util.Stimuli(yaml_path)
+    print(f"[+] Using {csv_path}")
+
+    summary = _json_summary(df, yaml_path.name, duration_s or 0.0)
+    entry = report_service.BatchEntry(yaml_path, out_dir, df=df, stim=stim,
+                                      duration_s=duration_s, summary=summary)
+    entry.reports = _generate_reports(df, stim, yaml_path, out_dir, duration_s)
+    summary["reports_dir"] = str(entry.reports.out_dir)
+    if json_out:
+        print(json.dumps(summary))
+    return entry
 
 
 def main():
+    # Pin the non-interactive backend before anything draws. pdf_export and
+    # plot_manager use pyplot without choosing one, so with DISPLAY set and
+    # PySide6 installed matplotlib picks QtAgg, and the CLI hung in Qt after
+    # writing the PNGs, before the PDF existed.
+    import matplotlib
+    matplotlib.use("Agg")
+
     import chipify
 
     parser = argparse.ArgumentParser(
@@ -163,7 +226,8 @@ def main():
         help=(
             "Batch mode: run every *.yaml found in DIR.\n"
             "Results are written to per-datasheet subdirectories inside out/.\n"
-            "A JSON summary line is printed for each run."
+            "A JSON summary line is printed for each run. The order is by\n"
+            "file name, or datasheet_order in project.yaml."
         ),
     )
 
@@ -212,8 +276,22 @@ def main():
     parser.add_argument(
         "--reports",
         action="store_true",
-        help="After simulation, write the plots and reports declared in the "
-             "datasheet's 'reports:' block to out/reports/<timestamp>/.",
+        help=(
+            "After simulation, write the plots and reports declared in the\n"
+            "datasheet's 'reports:' block to out/reports/<timestamp>/.\n"
+            "With --batch, also write one combined PDF (a summary page, then\n"
+            "every datasheet's report) to out/reports/<timestamp>/."
+        ),
+    )
+
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help=(
+            "Write the reports from the newest finished run instead of\n"
+            "simulating (out/history/, or out/<datasheet>/history/ with\n"
+            "--batch). Implies --reports."
+        ),
     )
 
     parser.add_argument(
@@ -239,14 +317,17 @@ def main():
 
     # ── Batch mode ────────────────────────────────────────────────────────────
     if args.batch:
+        from chipify import project_config, report_service
+
         batch_dir = Path(args.batch)
-        yaml_files = sorted(batch_dir.glob("*.yaml"))
+        yaml_files = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
         if not yaml_files:
             print(f"[-] No *.yaml files found in: {batch_dir}")
             sys.exit(1)
 
         print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")
         summaries = []
+        entries = []
         all_ok = True
         for yaml_path in yaml_files:
             print(f"\n{'='*60}")
@@ -254,28 +335,36 @@ def main():
             # overwrite each other's simulation_results.csv.
             stem = yaml_path.stem
             run_out_dir = Path(settings.OUT_DIR) / stem
-            summary = _run_single(yaml_path, json_out=args.json,
-                                  simulator_override=args.simulator,
-                                  templates_dir=args.templates_dir,
-                                  progress_stream=args.progress_stream,
-                                  out_dir=run_out_dir, reports=args.reports)
-            if summary is None:
+            if args.report_only:
+                entry = _load_finished_run(yaml_path, out_dir=run_out_dir,
+                                           json_out=args.json)
+            else:
+                entry = _run_single(yaml_path, json_out=args.json,
+                                    simulator_override=args.simulator,
+                                    templates_dir=args.templates_dir,
+                                    progress_stream=args.progress_stream,
+                                    out_dir=run_out_dir, reports=args.reports)
+            if entry is None:
                 all_ok = False
-                summary = {"yaml": yaml_path.name, "error": "no data"}
+                error = "no finished run" if args.report_only else "no data"
+                entry = report_service.BatchEntry(
+                    yaml_path, run_out_dir, error=error,
+                    summary={"yaml": yaml_path.name, "error": error})
             elif args.markdown:
-                try:
-                    from chipify import md_export
-                    import pandas as pd
-                    md_dir = Path(args.markdown)
-                    md_dir.mkdir(parents=True, exist_ok=True)
-                    md_path = md_dir / f"{stem}.md"
-                    df = pd.read_csv(run_out_dir / "simulation_results.csv")
-                    stim = util.Stimuli(yaml_path)
-                    md_export.generate_md_report(df, stim, yaml_path, md_path)
-                    print(f"[+] Markdown report saved to {md_path}")
-                except Exception as exc:
-                    print(f"[!] Markdown report failed for {stem}: {exc}")
-            summaries.append(summary)
+                _write_markdown(entry, Path(args.markdown) / f"{stem}.md")
+            entries.append(entry)
+            summaries.append(entry.summary)
+
+        batch_line = {"batch_summary": summaries}
+        if args.reports or args.report_only:
+            print(f"\n{'='*60}")
+            result = report_service.generate_batch_report(entries, settings.OUT_DIR)
+            for warning in result.warnings:
+                print(f"[!] {warning}")
+            if result.pdf_report:
+                print(f"[+] Combined report: {result.pdf_report}")
+            batch_line["combined_report"] = (
+                str(result.pdf_report) if result.pdf_report else None)
 
         print(f"\n{'='*60}")
         print(f"[*] Batch complete: {len(summaries)} run(s).")
@@ -286,7 +375,7 @@ def main():
                 print(f"    {s['yaml']}: {s.get('yield', '?')}%")
 
         if args.json:
-            print(json.dumps({"batch_summary": summaries}))
+            print(json.dumps(batch_line))
 
         sys.exit(0 if all_ok else 1)
 
@@ -296,26 +385,22 @@ def main():
         print(f"[-] Fatal Error: configuration file '{yaml_path}' not found!")
         sys.exit(1)
 
-    print("[*] Initialising Chipify...")
-    summary = _run_single(yaml_path, json_out=args.json,
-                          simulator_override=args.simulator,
-                          templates_dir=args.templates_dir,
-                          progress_stream=args.progress_stream,
-                          reports=args.reports)
-    if summary is None:
+    if args.report_only:
+        entry = _load_finished_run(yaml_path, out_dir=settings.OUT_DIR,
+                                   json_out=args.json)
+    else:
+        print("[*] Initialising Chipify...")
+        entry = _run_single(yaml_path, json_out=args.json,
+                            simulator_override=args.simulator,
+                            templates_dir=args.templates_dir,
+                            progress_stream=args.progress_stream,
+                            reports=args.reports)
+    if entry is None:
         sys.exit(1)
 
     # Optional Markdown report
     if args.markdown:
-        try:
-            from chipify import md_export
-            stim = util.Stimuli(yaml_path)
-            import pandas as pd
-            df = pd.read_csv(Path(settings.OUT_DIR) / "simulation_results.csv")
-            md_export.generate_md_report(df, stim, yaml_path, args.markdown)
-            print(f"[+] Markdown report saved to {args.markdown}")
-        except Exception as exc:
-            print(f"[!] Markdown report failed: {exc}")
+        _write_markdown(entry, args.markdown)
 
 if __name__ == "__main__":
     main()

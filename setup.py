@@ -46,6 +46,10 @@ setup(
         "matplotlib",
         "scipy",
         "asteval",
+        # Merges the datasheets' report PDFs into the --batch combined report
+        # and adds its bookmarks (pure Python). >=3.0: PdfWriter.append /
+        # add_outline_item.
+        "pypdf>=3.0",
     ],
     extras_require={
         # pip install chipify[vacask]  → pulls in PyOPUS for VACASK engine support

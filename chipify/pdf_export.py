@@ -10,12 +10,17 @@ Page structure (strict A4 portrait throughout):
   3. Histograms     – 2-up per page, white bg, Gauss fit + spec lines +
                       per-plot annotation box (μ, σ, Cpk, Status)
   4. Correlation    – white-background Pearson heatmap
+
+The batch report (:func:`generate_batch_pdf`) puts a summary page with one row
+per datasheet in front of the datasheets' own reports.
 """
 
 import datetime
+import io
 import logging
 import math
 import textwrap
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -173,7 +178,15 @@ def _add_cover(pdf: PdfPages, df: pd.DataFrame, yaml_path, rows, stim, sim_durat
     yaml_name = Path(yaml_path).name if yaml_path else "Unknown"
     ax.text(0.5, 0.955, yaml_name,
             ha="center", va="top", fontsize=12, weight="bold", color=DGRAY)
-    ax.text(0.5, 0.925,
+    description = str(getattr(stim, "description", "") or "")
+    generated_y = 0.925
+    if description:
+        if len(description) > 95:
+            description = description[:92] + "…"
+        ax.text(0.5, 0.932, description,
+                ha="center", va="top", fontsize=9.5, color=DGRAY, style="italic")
+        generated_y = 0.908
+    ax.text(0.5, generated_y,
             datetime.datetime.now().strftime("Generated  %Y-%m-%d  %H:%M:%S"),
             ha="center", va="top", fontsize=9, color=MGRAY)
 
@@ -533,8 +546,94 @@ def _fit_axes_to_band(fig, band=_PLOT_BAND) -> None:
         ])
 
 
-def _add_report_plots(pdf: PdfPages, df, stim, plots: list, out_root) -> None:
-    """One page per plot declared in the datasheet's ``reports:`` block.
+#: Two plots per page (``plots_per_page: 2``). Every renderer owns its whole
+#: figure (``fig.clf()``, ``tight_layout()``), so two cannot share one. Each is
+#: drawn on its own A4-wide figure of _SLOT_H inches, saved as a one-page PDF,
+#: and placed onto the report page afterwards (:func:`_place_slots`) — vector
+#: all the way, no rasterising.
+_SLOT_H = 4.8
+#: Top edge of each slot, in inches from the bottom of the page. The header
+#: banner ends at 10.93 in; each slot has a caption line above it.
+_SLOT_TOPS = (10.58, 5.38)
+#: Plot band inside a slot figure: the single-plot page's left/right margins,
+#: a reduced height (about 3.7 in instead of 5.6 in), room for title and labels.
+_SLOT_BAND = (0.11, 0.12, 0.79, 0.78)
+
+
+def _render_slot_pdf(spec, df, stim, out_root, name) -> bytes:
+    """One plot on a slot-sized figure, as the bytes of a one-page PDF."""
+    from chipify import report_service
+
+    size = (A4[0], _SLOT_H)
+    try:
+        fig, _ = report_service.render_spec(
+            spec, df, stim, out_root=out_root,
+            theme=PlotManager_PRINT_THEME, figsize=size,
+        )
+        _fit_axes_to_band(fig, _SLOT_BAND)
+    except Exception as exc:  # noqa: BLE001 — one bad spec must not kill the report
+        log.warning("Report plot %r could not be drawn into the PDF: %s", name, exc)
+        fig = plt.figure(figsize=size, facecolor="white")
+        fig.text(0.5, 0.5, f"{name}\ncould not be rendered:\n{exc}",
+                 ha="center", va="center", color=RED, fontsize=11, wrap=True)
+    buf = io.BytesIO()
+    with white_background(fig):
+        fig.savefig(buf, format="pdf", facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _add_report_plot_pairs(pdf: PdfPages, df, stim, plots: list, out_root) -> list:
+    """Pages of two stacked plots; returns where the plots go (see _place_slots).
+
+    The pages are written with their header and a caption per slot; the plots
+    themselves are placed once the PDF is closed.
+    """
+    from chipify import report_service
+
+    pairs = [plots[i:i + 2] for i in range(0, len(plots), 2)]
+    placements = []
+    for page_no, pair in enumerate(pairs, start=1):
+        fig = plt.figure(figsize=A4, facecolor="white")
+        _page_header(fig, f"Plots   ({page_no} / {len(pairs)})")
+        slots = []
+        for top, spec in zip(_SLOT_TOPS, pair):
+            name = report_service.default_plot_name(spec)
+            fig.text(_SLOT_BAND[0], (top + 0.17) / A4[1], name, ha="left",
+                     va="center", fontsize=11, weight="bold", color=DGRAY)
+            slots.append((_render_slot_pdf(spec, df, stim, out_root, name),
+                          top - _SLOT_H))
+        pdf.savefig(fig, facecolor="white")
+        plt.close(fig)
+        placements.append((pdf.get_pagecount() - 1, slots))
+    return placements
+
+
+def _place_slots(pdf_path, placements) -> None:
+    """Overlay the two-up plots onto their pages of the finished PDF.
+
+    *placements* is ``[(page_index, [(pdf_bytes, bottom_inches), ...]), ...]``.
+    The slot PDFs are as wide as the page, so each only needs moving up.
+    """
+    from pypdf import PdfReader, PdfWriter, Transformation
+
+    reader = PdfReader(str(pdf_path))
+    writer = PdfWriter()
+    writer.append(reader)
+    for index, slots in placements:
+        page = writer.pages[index]
+        for data, bottom in slots:
+            page.merge_transformed_page(PdfReader(io.BytesIO(data)).pages[0],
+                                        Transformation().translate(0, bottom * 72))
+    if reader.metadata:
+        writer.add_metadata(reader.metadata)
+    with open(pdf_path, "wb") as fh:
+        writer.write(fh)
+
+
+def _add_report_plots(pdf: PdfPages, df, stim, plots: list, out_root,
+                      per_page: int = 1) -> list:
+    """The plots declared in the datasheet's ``reports:`` block.
 
     Renders through ``report_service.render_spec`` — the same call that writes
     the standalone PNG/SVG — so the report contains exactly the configured
@@ -542,10 +641,22 @@ def _add_report_plots(pdf: PdfPages, df, stim, plots: list, out_root) -> None:
     ever showed its own per-measurement histograms, so a configured scatter,
     transient or DC sweep appeared as an image but was missing from the report.
 
-    Each renderer owns its whole figure (they all call ``fig.clf()``), so every
-    plot gets its own page rather than sharing one.
+    Each renderer owns its whole figure (they all call ``fig.clf()``), so with
+    *per_page* 1 every plot gets its own page. With 2, two plots are stacked
+    per page (:func:`_add_report_plot_pairs`); the returned placements must
+    then be applied with :func:`_place_slots` once the PDF is closed. Returns
+    ``[]`` for one plot per page.
     """
     from chipify import report_service
+
+    if per_page == 2:
+        try:
+            import pypdf  # noqa: F401 — places the plots onto their pages
+        except ImportError:
+            log.warning("plots_per_page: 2 needs pypdf (pip install pypdf); "
+                        "using one plot per page.")
+        else:
+            return _add_report_plot_pairs(pdf, df, stim, plots, out_root)
 
     total = len(plots)
     for i, spec in enumerate(plots, start=1):
@@ -572,6 +683,7 @@ def _add_report_plots(pdf: PdfPages, df, stim, plots: list, out_root) -> None:
         with white_background(fig, axes=plot_axes):
             pdf.savefig(fig, facecolor="white")
         plt.close(fig)
+    return []
 
 def _add_histograms(pdf: PdfPages, df: pd.DataFrame, stim, rows_meta: list):
     """Distribution pages, one measurement per slot.
@@ -726,6 +838,7 @@ def generate_pdf_report(df, stim, yaml_path, out_dir, sim_duration_sec=None,
     # what made a wholly failed sweep render as a clean PASS.
     rows     = _meas.measurement_rows(prepared, stim)
     errors   = _meas.error_rows(prepared, stim)
+    placements = []
 
     with mpl.rc_context(_PDF_RCPARAMS), PdfPages(pdf_path) as pdf:
         _add_cover(pdf, prepared, yaml_path, rows, stim, sim_duration_sec=sim_duration_sec)
@@ -735,7 +848,9 @@ def generate_pdf_report(df, stim, yaml_path, out_dir, sim_duration_sec=None,
             # "Exactly the plots the datasheet asks for": the automatic
             # per-measurement histograms and the correlation page would be
             # extra figures nobody requested.
-            _add_report_plots(pdf, prepared, stim, cfg_plots, out_root)
+            placements = _add_report_plots(
+                pdf, prepared, stim, cfg_plots, out_root,
+                per_page=getattr(cfg, "plots_per_page", 1))
         else:
             _add_histograms(pdf, prepared, stim, rows)
             # corr() is pairwise and the nunique() > 1 filter already drops
@@ -743,4 +858,273 @@ def generate_pdf_report(df, stim, yaml_path, out_dir, sim_duration_sec=None,
             _add_correlation(pdf, prepared)
         _add_plugin_pages(pdf, valid_df, stim)
 
+    if placements:
+        _place_slots(pdf_path, placements)
     return str(pdf_path)
+
+
+# ── Batch report: summary page + the datasheets' own reports ──────────────────
+
+NAVY = "#1f4e89"
+
+#: Summary-page geometry, in inches from the top-left corner of the sheet.
+_SUM_LEFT = 0.8
+_SUM_RIGHT = A4[0] - 0.8
+_SUM_TOP = 0.9
+_SUM_BOTTOM = A4[1] - 0.8
+_SUM_HEADER_H = 0.32
+_SUM_ROW_H = 0.30
+_SUM_LINE_H = 0.22
+#: (heading, width in inches); the widths add up to the text width.
+_SUM_COLUMNS = (("datasheet", 2.17), ("runs", 0.7), ("valid", 0.7),
+                ("passed", 0.7), ("yield", 0.85), ("time", 0.85), ("page", 0.7))
+
+
+@dataclass
+class BatchSection:
+    """One datasheet of a batch report: its summary row and its own report.
+
+    ``pdf_path`` is the datasheet's finished report, appended unchanged after
+    the summary. ``None`` lists the datasheet without pages of its own (a run
+    that crashed). ``error`` marks a datasheet that produced no results.
+    """
+
+    label: str
+    pdf_path: str | None = None
+    description: str = ""
+    total: int | None = None
+    valid: int | None = None
+    passed: int | None = None
+    yield_pct: float | None = None
+    duration_s: float | None = None
+    failing: list[str] = field(default_factory=list)
+    erroring: list[str] = field(default_factory=list)
+    error: str = ""
+    #: First page of the section in the combined PDF; set by generate_batch_pdf.
+    start_page: int | None = None
+
+
+class _SummaryLayout:
+    """Flow layout for the summary page(s): planned first, drawn second.
+
+    Planning fixes the page count before anything is drawn. The table prints
+    each section's start page, and those depend on how many summary pages
+    come first.
+    """
+
+    def __init__(self):
+        self.pages = []
+        self.y = _SUM_TOP
+        self.new_page()
+
+    def new_page(self):
+        self.pages.append([])
+        self.y = _SUM_TOP
+
+    def fits(self, height):
+        return self.y + height <= _SUM_BOTTOM
+
+    def add(self, height, draw):
+        """Reserve *height* inches and queue ``draw(ax, y)`` at the current y."""
+        y = self.y
+        self.pages[-1].append(lambda ax: draw(ax, y))
+        self.y += height
+
+    def space(self, height):
+        """Vertical gap; dropped at a page break, where it is not needed."""
+        if self.fits(height):
+            self.y += height
+
+
+def _sum_cell(ax, x, y, w, h, text, *, bg="white", fg="black", bold=False):
+    ax.add_patch(mpatches.Rectangle((x, y), w, h, facecolor=bg,
+                                    edgecolor="black", linewidth=0.8))
+    ax.text(x + w / 2, y + h / 2, text, ha="center", va="center",
+            fontsize=9.5, color=fg, weight="bold" if bold else "normal")
+
+
+def _sum_row(ax, y, values, *, yield_bg="white", header=False, bold=False):
+    x = (A4[0] - sum(w for _, w in _SUM_COLUMNS)) / 2
+    height = _SUM_HEADER_H if header else _SUM_ROW_H
+    for (name, w), text in zip(_SUM_COLUMNS, values):
+        if header:
+            _sum_cell(ax, x, y, w, height, text, bg=NAVY, fg="white", bold=True)
+        else:
+            _sum_cell(ax, x, y, w, height, text,
+                      bg=yield_bg if name == "yield" else "white", bold=bold)
+        x += w
+
+
+def _yield_bg(yield_pct):
+    """Yield cell colour, on the same thresholds as the cover's yield badge."""
+    if yield_pct is None:
+        return LRED
+    return LGREEN if yield_pct >= 99 else LAMBER if yield_pct >= 80 else LRED
+
+
+def _fmt_minutes(seconds):
+    return "—" if seconds is None else f"{seconds / 60:.1f} min"
+
+
+def _section_values(s):
+    label = s.label if len(s.label) <= 30 else s.label[:29] + "…"
+    page = str(s.start_page) if s.start_page else "—"
+    if s.error or s.total is None:
+        return [label, "—", "—", "—", "no data", _fmt_minutes(s.duration_s), page]
+    return [label, str(s.total), str(s.valid), str(s.passed),
+            f"{s.yield_pct:.1f} %", _fmt_minutes(s.duration_s), page]
+
+
+def _plan_batch_summary(sections, title, subtitle, generated):
+    lay = _SummaryLayout()
+    left, mid = _SUM_LEFT, A4[0] / 2
+    title_size = 24 if len(title) <= 34 else max(14, 24 * 34 / len(title))
+
+    def heading(text, size=16):
+        def draw(ax, y):
+            ax.text(left, y + 0.22, text, ha="left", va="center",
+                    fontsize=size, weight="bold", color=NAVY)
+        return draw
+
+    def title_block(ax, y):
+        ax.text(mid, y + 0.35, title, ha="center", va="center",
+                fontsize=title_size, weight="bold", color=NAVY)
+        if subtitle:
+            ax.text(mid, y + 0.85, subtitle, ha="center", va="center", fontsize=12)
+        ax.text(mid, y + 1.15, generated, ha="center", va="center",
+                fontsize=9.5, color="grey")
+
+    def note(ax, y):
+        ax.text(left, y + 0.12, "Each datasheet below follows as its own Chipify "
+                "report (cover, measurement table, plots).",
+                ha="left", va="center", fontsize=9.5, color=DGRAY)
+
+    def header(ax, y):
+        _sum_row(ax, y, [name for name, _ in _SUM_COLUMNS], header=True)
+
+    def continue_table():
+        lay.new_page()
+        lay.add(0.45, heading("Contents (continued)"))
+        lay.add(_SUM_HEADER_H, header)
+
+    lay.add(1.6, title_block)
+    lay.add(0.45, heading("Contents"))
+    lay.add(0.4, note)
+    lay.add(_SUM_HEADER_H, header)
+    for s in sections:
+        if not lay.fits(_SUM_ROW_H):
+            continue_table()
+        lay.add(_SUM_ROW_H, lambda ax, y, s=s: _sum_row(
+            ax, y, _section_values(s),
+            yield_bg=_yield_bg(None if s.error else s.yield_pct)))
+
+    measured = [s for s in sections if not s.error and s.total is not None]
+    if len(measured) > 1:
+        total = sum(s.total for s in measured)
+        passed = sum(s.passed for s in measured)
+        yield_pct = passed / total * 100.0 if total else 0.0
+        durations = [s.duration_s for s in measured if s.duration_s is not None]
+        values = ["total", str(total), str(sum(s.valid for s in measured)),
+                  str(passed), f"{yield_pct:.1f} %",
+                  _fmt_minutes(sum(durations) if durations else None), ""]
+        if not lay.fits(_SUM_ROW_H):
+            continue_table()
+        lay.add(_SUM_ROW_H, lambda ax, y: _sum_row(
+            ax, y, values, yield_bg=_yield_bg(yield_pct), bold=True))
+
+    def text_section(name, entries):
+        """Bold label column + wrapped text; *entries* = (label, [(text, colour)])."""
+        if not entries:
+            return
+        label_w = max(len(label) + 1 for label, _ in entries) * 9 * 0.62 / 72 + 0.3
+        x_text = left + min(max(label_w, 1.5), 3.5)
+        chars = max(20, int((_SUM_RIGHT - x_text) * 72 / (9 * 0.52)))
+        lay.space(0.45)
+        if not lay.fits(0.45 + _SUM_LINE_H):
+            lay.new_page()
+        lay.add(0.45, heading(name, size=13))
+        for label, parts in entries:
+            lines = [(line, colour) for text, colour in parts
+                     for line in (textwrap.wrap(text, chars) or [""])]
+            height = len(lines) * _SUM_LINE_H
+            if not lay.fits(height):
+                lay.new_page()
+                lay.add(0.45, heading(f"{name} (continued)", size=13))
+
+            def draw(ax, y, label=label, lines=lines):
+                ax.text(left, y + _SUM_LINE_H / 2, f"{label}:", ha="left",
+                        va="center", fontsize=9, weight="bold")
+                for i, (line, colour) in enumerate(lines):
+                    ax.text(x_text, y + (i + 0.5) * _SUM_LINE_H, line,
+                            ha="left", va="center", fontsize=9, color=colour)
+            lay.add(height, draw)
+
+    text_section("What each datasheet covers",
+                 [(s.label, [(s.description, "black")])
+                  for s in sections if s.description])
+
+    problems = []
+    for s in sections:
+        parts = []
+        if s.error:
+            parts.append((f"no results ({s.error})", RED))
+        if s.failing:
+            parts.append(("FAIL: " + ", ".join(s.failing), RED))
+        if s.erroring:
+            parts.append(("ERROR: " + ", ".join(s.erroring), AMBER))
+        if parts:
+            problems.append((s.label, parts))
+    text_section("Failing measurements", problems)
+    return lay
+
+
+def generate_batch_pdf(sections, out_path, *, title, subtitle="", generated=None):
+    """Write the combined batch report and return its path.
+
+    Summary page(s) first, then every section's own report PDF, appended as it
+    is: nothing is rendered twice. Each section's page count is read up front
+    so the summary can print its start page, and each gets a bookmark. Sets
+    ``start_page`` on every section that has pages.
+    """
+    import chipify
+    from pypdf import PdfReader, PdfWriter
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    counts = [len(PdfReader(s.pdf_path).pages) if s.pdf_path else 0
+              for s in sections]
+    generated = generated or datetime.datetime.now()
+    stamp = f"generated {generated:%Y-%m-%d %H:%M}  ·  chipify {chipify.__version__}"
+
+    lay = _plan_batch_summary(sections, title, subtitle, stamp)
+    page = len(lay.pages) + 1
+    for s, n in zip(sections, counts):
+        s.start_page = page if n else None
+        page += n
+
+    buf = io.BytesIO()
+    with mpl.rc_context(_PDF_RCPARAMS), PdfPages(buf) as pdf:
+        for ops in lay.pages:
+            fig = plt.figure(figsize=A4, facecolor="white")
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(0, A4[0])
+            ax.set_ylim(A4[1], 0)  # y grows downwards, in inches
+            ax.axis("off")
+            for op in ops:
+                op(ax)
+            pdf.savefig(fig)
+            plt.close(fig)
+    buf.seek(0)
+
+    writer = PdfWriter()
+    writer.append(buf, import_outline=False)
+    writer.add_outline_item("Summary", 0)
+    for s, n in zip(sections, counts):
+        if n:
+            writer.append(s.pdf_path, import_outline=False)
+            writer.add_outline_item(s.label, s.start_page - 1)
+    writer.add_metadata({"/Title": title})
+    writer.page_mode = "/UseOutlines"
+    with open(out_path, "wb") as fh:
+        writer.write(fh)
+    return str(out_path)

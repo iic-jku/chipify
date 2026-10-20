@@ -103,7 +103,10 @@ it). Place your datasheet YAML in the input folder (`datasheets/` by default), t
 
 ```bash
 chipify-cli -c my_design.yaml          # run a single datasheet
+chipify-cli -c my_design.yaml --reports  # ...and write what its reports: block asks for
 chipify-cli --batch ./datasheets       # run every *.yaml in a directory
+chipify-cli --batch ./datasheets --reports      # ...plus one combined PDF for all of them
+chipify-cli --batch ./datasheets --report-only  # rebuild the reports from finished runs
 chipify-cli -c my_design.yaml --json   # also print a JSON summary (handy for CI)
 chipify-cli -c my_design.yaml --markdown report.md
 ```
@@ -111,6 +114,27 @@ chipify-cli -c my_design.yaml --markdown report.md
 Results are written to the output folder (`out/` by default), including
 `simulation_results.csv` and any generated reports. Run `chipify-cli --help`
 for the full list of options.
+
+In batch mode each datasheet gets its own folder, `out/<datasheet>/` (results,
+`history/`, waveforms in `analysis_data/`, `reports/`). With `--reports` the batch
+also writes one combined PDF, `out/reports/<timestamp>/batch_report_<timestamp>.pdf`:
+a summary page with one row per datasheet (runs, valid, passed, yield, time,
+start page), each datasheet's `description:` and its failing measurements,
+followed by every datasheet's own report, with one bookmark per datasheet.
+`--report-only` rebuilds all of this from each datasheet's newest finished run
+without simulating, for example after editing the `reports:` blocks.
+
+A datasheet's optional one-line `description:` (top-level key, also editable in
+the GUI's Datasheet Editor) appears on its report cover and on the summary
+page. An optional `project.yaml` in the project root sets the batch report's
+title (`name`) and subtitle (`description`), and `datasheet_order` sets the
+order (by default, by file name; unlisted files follow in that order):
+
+```yaml
+name: bandgap
+description: Chipify characterization report, IHP SG13CMOS5L, ngspice-47
+datasheet_order: [corners_op.yaml, corners_tc.yaml, corners_ac.yaml]
+```
 
 ## Configuration
 

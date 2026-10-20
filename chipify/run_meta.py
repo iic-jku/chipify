@@ -20,12 +20,18 @@ Schema (v1)
   "valid_runs":     497,
   "global_yield":   99.4,
   "templates_dir":  "",            // persisted netlist templates of this run
+  "analysis_dirs":  {"transient": "analysis_data/transient/20260506_150000"},
   "notes":          "",
   "tags":           []
 }
 
 All fields except `schema_version` and `timestamp` are optional /
 best-effort so older code loading new meta files does not crash.
+
+``analysis_dirs`` / ``tran_dir`` are stored relative to the run's output root
+(the folder holding ``history/``), so an ``out/`` folder that is moved or copied
+keeps finding its waveforms. Sidecars from older versions hold absolute paths;
+:func:`analysis_dirs_for` accepts both.
 """
 
 from __future__ import annotations
@@ -83,6 +89,26 @@ def _meta_path(csv_path: str | os.PathLike[str]) -> Path:
     return Path(csv_path).with_suffix(".meta.json")
 
 
+def output_root(csv_path: str | os.PathLike[str]) -> Path:
+    """The output root a run CSV belongs to.
+
+    ``<root>/history/run_<ts>.csv`` and ``<root>/simulation_results.csv`` both
+    belong to ``<root>`` — the folder that also holds ``analysis_data/``.
+    """
+    parent = Path(csv_path).parent
+    return parent.parent if parent.name == "history" else parent
+
+
+def _relative_to_root(path: str, root: Path) -> str:
+    """*path* relative to *root* when it lies inside it, else unchanged."""
+    if not path:
+        return path
+    try:
+        return Path(path).resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def write_meta(
@@ -103,11 +129,19 @@ def write_meta(
     ``analysis_dirs`` maps analysis kind (transient/dc/ac) to the per-run CSV
     directory of this run, so the GUI can resolve waveform data for any kind
     when a history run is re-loaded. ``tran_dir`` is the legacy
-    transient-only alias. ``templates_dir`` holds this run's persisted Jinja2
-    netlist templates (one ``<safe_tb>.spice|.sim`` per testbench).
+    transient-only alias. Both are written relative to the run's output root
+    (see :func:`output_root`) when they lie inside it. ``templates_dir`` holds
+    this run's persisted Jinja2 netlist templates (one ``<safe_tb>.spice|.sim``
+    per testbench).
 
     Returns the path written, or "" on failure.
     """
+    root = output_root(csv_path)
+    tran_dir = _relative_to_root(str(tran_dir or ""), root)
+    analysis_dirs = {
+        kind: _relative_to_root(str(d or ""), root)
+        for kind, d in (analysis_dirs or {}).items()
+    }
     meta: dict = {
         "schema_version": _SCHEMA_VERSION,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -177,3 +211,29 @@ def read_meta(csv_path: str | os.PathLike[str]) -> dict:
     except Exception as exc:
         log.warning("Could not read run metadata %s: %s", path, exc)
         return {}
+
+
+def analysis_dirs_for(csv_path: str | os.PathLike[str],
+                      meta: dict | None = None) -> dict[str, str]:
+    """Absolute waveform directories recorded for the run *csv_path*.
+
+    Reads the sidecar unless *meta* is given. Relative entries are resolved
+    against the run's output root; absolute ones (older sidecars) are kept as
+    they are. The legacy ``tran_dir`` fills in ``transient`` when
+    ``analysis_dirs`` has no entry for it. Returns ``{}`` when nothing is
+    recorded.
+    """
+    if meta is None:
+        meta = read_meta(csv_path)
+    root = output_root(csv_path)
+    raw = meta.get("analysis_dirs")
+    dirs = dict(raw) if isinstance(raw, dict) else {}
+    if not dirs.get("transient") and meta.get("tran_dir"):
+        dirs["transient"] = meta["tran_dir"]
+    resolved: dict[str, str] = {}
+    for kind, d in dirs.items():
+        if not d:
+            continue
+        p = Path(str(d))
+        resolved[str(kind)] = str(p if p.is_absolute() else root / p)
+    return resolved

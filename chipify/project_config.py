@@ -7,12 +7,14 @@ lets teams share consistent defaults without touching ``settings.json``.
 
 Schema (all fields optional)
 -----------------------------
-name: My IC Project
-description: Short description shown in the GUI title bar.
+name: My IC Project                 # also the batch report's title
+description: Short description shown in the GUI title bar (and as the batch
+  report's subtitle).
 default_datasheet: datasheet.yaml   # pre-selected YAML on startup
 default_report_profile: datasheet   # compact | datasheet | deep-dive
 default_num_cores: 4
 default_tags: [nightly, tape-out-v2]
+datasheet_order: [op.yaml, ac.yaml] # --batch order; unlisted files follow, sorted
 notes: |
   Multi-line freetext shown in the Settings dialog.
 
@@ -51,6 +53,7 @@ _ALLOWED_KEYS = {
     "default_report_profile",
     "default_num_cores",
     "default_tags",
+    "datasheet_order",
     "notes",
 }
 
@@ -71,6 +74,32 @@ def load() -> dict:
     except Exception as exc:
         log.warning("Could not read project.yaml: %s", exc)
         return {}
+
+
+def order_datasheets(paths: list[Path], order: list | None = None) -> list[Path]:
+    """Sort batch datasheets: ``datasheet_order`` first, the rest by name.
+
+    *order* defaults to ``datasheet_order`` from ``project.yaml``. Entries may
+    be file names (``op.yaml``) or stems (``op``); one that matches no file in
+    *paths* is logged and skipped.
+    """
+    if order is None:
+        order = load().get("datasheet_order") or []
+    if not isinstance(order, list):
+        log.warning("project.yaml: datasheet_order must be a list; ignored.")
+        order = []
+    remaining = sorted(paths, key=lambda p: p.name)
+    ordered: list[Path] = []
+    for entry in order:
+        match = next((p for p in remaining
+                      if str(entry) in (p.name, p.stem)), None)
+        if match is None:
+            log.warning("project.yaml: datasheet_order names %r, which is "
+                        "not in the batch.", entry)
+            continue
+        ordered.append(match)
+        remaining.remove(match)
+    return ordered + remaining
 
 
 def save(data: dict) -> bool:

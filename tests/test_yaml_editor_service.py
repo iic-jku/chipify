@@ -343,6 +343,17 @@ def test_reports_block_round_trips_through_the_config():
     assert ye.config_to_reports(cfg) == block
 
 
+def test_plots_per_page_round_trips_and_default_is_not_written():
+    from chipify.uikit.services import yaml_editor_service as ye
+
+    block = {"pdf": True, "plots_per_page": 2,
+             "plots": [{"type": "scatter", "x": "gain", "y": "pm"}]}
+    assert ye.config_to_reports(ye.reports_to_config({"reports": block})) == block
+    block["plots_per_page"] = 1
+    assert "plots_per_page" not in ye.config_to_reports(
+        ye.reports_to_config({"reports": block}))
+
+
 def test_absent_reports_block_reads_as_empty():
     from chipify.uikit.services import yaml_editor_service as ye
 
@@ -356,3 +367,24 @@ def test_empty_config_renders_as_none_so_the_key_is_removed():
     from chipify.uikit.services import yaml_editor_service as ye
 
     assert ye.config_to_reports(ReportsConfig()) is None
+
+
+# ── description ───────────────────────────────────────────────────────────────
+
+def test_new_description_goes_first_and_empty_removes_it():
+    from chipify.uikit.services import yaml_editor_service as ye
+
+    data = ye.set_description({"params": {"vdd": [1.8]}}, "  bias   chain ")
+    assert list(data) == ["description", "params"]
+    assert data["description"] == "bias chain"
+    assert "description" not in ye.set_description(data, "   ")
+
+
+def test_unchanged_block_scalar_description_is_left_alone():
+    """Showing a multi-line description as one line must not count as an edit."""
+    from chipify.uikit.services import yaml_editor_service as ye
+
+    data = {"description": "first line\nsecond line\n", "params": {}}
+    shown = ye.description_text(data)
+    assert shown == "first line second line"
+    assert ye.set_description(data, shown)["description"] == "first line\nsecond line\n"
