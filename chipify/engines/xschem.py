@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -26,6 +27,20 @@ log = logging.getLogger("chipify.engines.xschem")
 XSCHEM_DEFAULT_TIMEOUT_SEC = 60
 
 _XSCHEM_NETLIST_EXTS = (".spice", ".sim", ".spectre", ".scs", ".spc", ".sp", ".cdl", ".cir")
+
+#: The comment xschem writes in a SPICE netlist in place of an instance whose
+#: symbol it could not find: ``*  x1 -  source_follower  IS MISSING !!!!``.
+_RE_MISSING_SYMBOL = re.compile(r"^\*\s*(\S+)\s+-\s+(\S+)\s+IS MISSING", re.MULTILINE)
+
+
+def missing_symbols(netlist: str) -> list[str]:
+    """Instances xschem left out of *netlist* because their symbol was missing.
+
+    xschem still exits normally and writes the rest of the netlist, so the
+    simulation ran without that block and failed later or, worse, not at all.
+    ``--spectre`` netlists drop such an instance without any marker.
+    """
+    return [f"{inst} ({sym})" for inst, sym in _RE_MISSING_SYMBOL.findall(netlist)]
 
 
 def safe_tb_path(tb_name: str) -> Path:
@@ -111,6 +126,9 @@ def run_xschem(
     xschem_file = Path(xschem_file)
     fast_tmp = Path(settings.FAST_TMP)
     project_root = Path(settings.PROJECT_ROOT)
+    # xschem itself reports a missing schematic only as "wrote no netlist".
+    if not xschem_file.is_file():
+        raise RuntimeError(f"Testbench schematic {xschem_file} does not exist.")
 
     mode = (netlist_mode or "spice").strip().lower()
     if mode not in ("spice", "spectre"):
@@ -250,6 +268,16 @@ def run_xschem(
             shutil.move(str(produced), str(out_file))
             log.info("Moved xschem output %s -> %s",
                      _safe_rel(produced), out_file)
+
+        missing = missing_symbols(
+            out_file.read_text(encoding="utf-8", errors="replace"))
+        if missing:
+            raise RuntimeError(
+                f"Xschem could not find the symbol of {', '.join(missing)} in "
+                f"{xschem_file.name}, so the netlist leaves it out. Relative "
+                f"symbol paths and XSCHEM_LIBRARY_PATH entries resolve against "
+                f"the project root ({project_root})."
+            )
 
         if process.returncode != 0:
             log.warning(

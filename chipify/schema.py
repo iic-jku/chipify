@@ -54,15 +54,15 @@ _ALLOWED_CALLS: dict[str, Any] = {
 }
 
 
-def _parse_range_dsl(value: str) -> list[float]:
+def _parse_range_dsl(value: str) -> list[int] | list[float]:
     """
     Parse a YAML parameter value that encodes a sequence via a safe DSL.
 
     Allowed forms
     -------------
-    - ``range(N)``                 → list(range(N))
-    - ``range(start, stop)``       → list(range(start, stop))
-    - ``range(start, stop, step)`` → list(range(start, stop, step))
+    - ``range(N)``                 → list(range(N)), integers
+    - ``range(start, stop)``       → list(range(start, stop)), integers
+    - ``range(start, stop, step)`` → list(range(start, stop, step)), integers
     - ``linspace(start, stop, N)`` → list of N evenly spaced floats
     - ``logspace(start, stop, N)`` → list of N log-spaced floats
 
@@ -76,8 +76,10 @@ def _parse_range_dsl(value: str) -> list[float]:
 
     Returns
     -------
-    list[float]
-        Evaluated sequence as a Python list.
+    list[int] | list[float]
+        Evaluated sequence as a Python list. ``range`` stays integer, as its
+        arguments are: as floats, ``seed: range(200)`` rendered
+        ``.option SEED = 3.0`` and stored ``seed = 3.0`` in the results.
 
     Raises
     ------
@@ -136,20 +138,27 @@ def _parse_range_dsl(value: str) -> list[float]:
 
     # Call the allowed function
     fn = _ALLOWED_CALLS[func_name]
+    if func_name == "range":
+        # int() used to truncate silently: range(2.5) swept 0 and 1.
+        fractional = [a for a in args if not float(a).is_integer()]
+        if fractional:
+            raise ValueError(
+                f"Range DSL {value!r}: range() takes whole numbers, got "
+                f"{fractional}; use linspace() for fractional steps."
+            )
+        try:
+            return list(fn(*[int(a) for a in args]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Range DSL {value!r}: failed to evaluate range({args!r}): {exc}"
+            ) from exc
     try:
-        if func_name == "range":
-            int_args = [int(a) for a in args]
-            result = list(fn(*int_args))
-        else:  # linspace / logspace return numpy arrays
-            result = fn(*args).tolist()
+        # linspace / logspace return numpy arrays.
+        return [float(x) for x in fn(*args).tolist()]
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Range DSL {value!r}: failed to evaluate {func_name}({args!r}): {exc}"
         ) from exc
-
-    if not isinstance(result, list):
-        result = list(result)
-    return [float(x) if not isinstance(x, float) else x for x in result]
 
 
 def _parse_scalar_value(raw: Any) -> float | None:
@@ -407,12 +416,8 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
     stim.description = _validate_description(data)
 
     # ── Parameters ────────────────────────────────────────────────────────────
-    params_raw: dict[str, Any] = {}
-    for key in ("parameters", "params", "sweep"):
-        if key in data and isinstance(data[key], dict):
-            params_raw = data[key]
-            break
-
+    params_raw = _mapping_block(data, ("parameters", "params", "sweep"),
+                                "a mapping of parameter names to values")
     stim.params = validate_parameters(params_raw)
 
     # ── Custom equations (scalar + waveform) ──────────────────────────────────
@@ -423,17 +428,21 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
     stim.reports = _validate_reports(data)
 
     # ── Tests / Testbenches ───────────────────────────────────────────────────
-    tests_raw: dict[str, Any] = {}
-    for key in ("tests", "testbenches", "measurements"):
-        if key in data and isinstance(data[key], dict):
-            tests_raw = data[key]
-            break
+    tests_raw = _mapping_block(data, ("tests", "testbenches", "measurements"),
+                               "a mapping of testbenches")
 
     from chipify.analyses import SCHEMA_KEY_TO_CLASS, Analysis
 
     for tb_path, measurements in tests_raw.items():
+        # An empty entry (`tb_x:` with nothing under it) is a testbench still
+        # being written; run_sim refuses to dispatch one that declares nothing.
+        if measurements is None:
+            measurements = {}
         if not isinstance(measurements, dict):
-            continue
+            raise SchemaError(
+                f"tests.{tb_path}: expected a mapping of measurements and "
+                f"settings, got {type(measurements).__name__}"
+            )
 
         analyses: list[Analysis] = []
         measure: dict[str, str] = {}
@@ -443,14 +452,23 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
 
         for val_name, bounds in measurements.items():
             if val_name in SCHEMA_KEY_TO_CLASS:
-                if isinstance(bounds, list) and bounds:
+                if bounds is not None and not isinstance(bounds, list):
+                    raise SchemaError(
+                        f"tests.{tb_path}.{val_name}: expected a list of signals, "
+                        f"got {type(bounds).__name__}"
+                    )
+                if bounds:
                     cls = SCHEMA_KEY_TO_CLASS[val_name]
                     analyses.append(cls(signals=[str(s) for s in bounds]))
                 continue
 
             if val_name == "measure":
-                if isinstance(bounds, dict):
-                    measure = {k: str(v) for k, v in bounds.items()}
+                if bounds is not None and not isinstance(bounds, dict):
+                    raise SchemaError(
+                        f"tests.{tb_path}.measure: expected a mapping of names "
+                        f"to expressions, got {type(bounds).__name__}"
+                    )
+                measure = {k: str(v) for k, v in (bounds or {}).items()}
                 continue
 
             if val_name == "engine":
@@ -477,9 +495,15 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
                     netlist_source = src or "xschem"
                 continue
 
-            # Measurement boundary spec
-            if not isinstance(bounds, dict):
+            # Measurement boundary spec. Anything but a mapping used to mean "no
+            # limits": `gain: [9, 11]` was a measurement that always passed.
+            if bounds is None:
                 bounds = {}
+            if not isinstance(bounds, dict):
+                raise SchemaError(
+                    f"tests.{tb_path}.{val_name}: expected a mapping such as "
+                    f"{{min: ..., max: ...}}, got {type(bounds).__name__}"
+                )
             try:
                 vmin = _parse_scalar_value(bounds.get("min", bounds.get("vmin")))
                 vmax = _parse_scalar_value(bounds.get("max", bounds.get("vmax")))
@@ -501,4 +525,71 @@ def validate_datasheet(data: dict[str, Any]) -> "Any":  # returns util.Stimuli
         t.netlist_source = netlist_source
         stim.addTest(t)
 
+    _check_result_columns(stim)
     return stim
+
+
+def _mapping_block(data: dict[str, Any], keys: tuple[str, ...],
+                   expected: str) -> dict[str, Any]:
+    """The first of *keys* present in *data*, which must be a mapping.
+
+    An empty block (``tests:`` with nothing under it) reads as an empty
+    mapping. Any other type used to be skipped without a word, so a list where
+    the testbench mapping belongs became a plan with no testbenches at all.
+    """
+    for key in keys:
+        if key not in data:
+            continue
+        block = data[key]
+        if block is None:
+            return {}
+        if not isinstance(block, dict):
+            raise SchemaError(f"{key}: expected {expected}, got {type(block).__name__}")
+        return block
+    return {}
+
+
+def _check_result_columns(stim: Any) -> None:
+    """Reject datasheet names that would share one column of the results.
+
+    Results are stored by name alone, one ``sample[name]`` per run. Two
+    testbenches declaring the same measurement shared a column: the later one
+    overwrote the earlier value while its error scope still pointed at the
+    first testbench. A measurement named like an input parameter, or a name
+    equal to one of chipify's own columns, overwrote that column the same way.
+    """
+    from chipify.data_loader import RESERVED_COLUMNS, TB_PASS_SUFFIX, tb_error_col
+
+    owners: dict[str, str] = {}
+    for test in stim.tests:
+        # A measure: entry may compute a value of the same testbench.
+        names = dict.fromkeys([v.name for v in test.value_lst] + list(test.measure))
+        for name in names:
+            owner = owners.setdefault(name, test.tb_path)
+            if owner != test.tb_path:
+                raise SchemaError(
+                    f"tests.{test.tb_path}.{name}: testbench {owner!r} already "
+                    f"declares {name!r}. Results are stored by measurement name, "
+                    f"so each testbench needs its own (for example with a "
+                    f"testbench prefix)."
+                )
+
+    generated = {col: "a column chipify writes itself" for col in RESERVED_COLUMNS}
+    for test in stim.tests:
+        generated[tb_error_col(test.tb_path)] = (
+            f"the error column of testbench {test.tb_path!r}")
+        generated[test.tb_path + TB_PASS_SUFFIX] = (
+            f"the verdict column of testbench {test.tb_path!r}")
+        for val in test.value_lst:
+            generated[f"{val.name}_pass"] = f"the verdict column of {val.name!r}"
+
+    for name, tb_path in owners.items():
+        if name in stim.params:
+            raise SchemaError(
+                f"tests.{tb_path}.{name}: same name as the input parameter {name!r}."
+            )
+        if name in generated:
+            raise SchemaError(f"tests.{tb_path}.{name}: same name as {generated[name]}.")
+    for name in stim.params:
+        if name in generated:
+            raise SchemaError(f"parameters.{name}: same name as {generated[name]}.")

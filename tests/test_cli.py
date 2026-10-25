@@ -120,6 +120,29 @@ def test_each_datasheet_keeps_its_own_waveforms(project, monkeypatch, capsys):
     assert not (project["out"] / "analysis_data").exists()
 
 
+def test_latest_results_get_their_own_sidecar(project, monkeypatch, capsys):
+    """The CLI rewrote simulation_results.csv but left the sidecar of an
+    earlier GUI run next to it, so the new results resolved to that run's
+    datasheet and waveforms."""
+    from chipify import data_loader as _dl
+    from chipify import run_meta
+
+    root = project["out"] / "alpha"
+    root.mkdir(parents=True)
+    (root / "simulation_results.meta.json").write_text(json.dumps({
+        "schema_version": 1, "yaml": "other.yaml",
+        "analysis_dirs": {"transient": "analysis_data/transient/19990101_000000"},
+    }), encoding="utf-8")
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+
+    latest = root / "simulation_results.csv"
+    hist = next((root / "history").glob("run_*.csv"))
+    assert run_meta.read_meta(latest)["yaml"] == "alpha.yaml"
+    assert (_dl.load_csv(str(latest)).attrs["analysis_dirs"]
+            == _dl.load_csv(str(hist)).attrs["analysis_dirs"])
+
+
 def test_a_failed_datasheet_fails_the_batch_but_stays_in_the_report(
         project, monkeypatch, capsys):
     from chipify import simulator
@@ -139,6 +162,27 @@ def test_a_failed_datasheet_fails_the_batch_but_stays_in_the_report(
     assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "beta"]
 
 
+@pytest.mark.parametrize("mode", [[], ["--report-only"]])
+@pytest.mark.parametrize("bad_text", [
+    "tests: {tb: [unclosed",                       # not YAML
+    "tests: [gain]",                               # YAML, but not a datasheet
+])
+def test_an_unreadable_datasheet_does_not_end_the_batch(
+        project, monkeypatch, capsys, mode, bad_text):
+    """Parsing ran outside the per-datasheet guard: the first broken YAML
+    ended the batch, so beta never ran and no summary was printed."""
+    if mode:
+        _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    (project["batch"] / "alpha.yaml").write_text(bad_text, encoding="utf-8")
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--reports", *mode, "--json")
+    assert code == 1
+    alpha, beta = lines[-1]["batch_summary"]
+    assert alpha["yaml"] == "alpha.yaml" and alpha["error"]
+    assert beta["yaml"] == "beta.yaml" and beta["total"] == 3
+    assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "beta"]
+
+
 def test_report_only_rebuilds_from_finished_runs(project, monkeypatch, capsys):
     from chipify import simulator
 
@@ -155,6 +199,59 @@ def test_report_only_rebuilds_from_finished_runs(project, monkeypatch, capsys):
     assert [s["total"] for s in per_datasheet] == [3, 3]
     assert all(Path(s["reports_dir"]).is_dir() for s in per_datasheet)
     assert _outline_titles(batch["combined_report"]) == ["Summary", "alpha", "beta"]
+
+
+def test_report_only_grades_against_the_current_limits(project, monkeypatch, capsys):
+    """The report prints the edited datasheet's limits, so the saved run's
+    verdicts must follow them: 10.2 dB used to stay PASS under a 10.1 max."""
+    from chipify import simulator
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    alpha = project["batch"] / "alpha.yaml"
+    alpha.write_text(alpha.read_text(encoding="utf-8").replace("max: 11", "max: 10.1"),
+                     encoding="utf-8")
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("--report-only must not simulate")
+
+    monkeypatch.setattr(simulator, "run_sim", must_not_run)
+    _code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                         "--report-only", "--json")
+    passed = {s["yaml"]: s["passed"] for s in lines[:-1]}
+    assert passed == {"alpha.yaml": 2, "beta.yaml": 3}
+
+
+_EQUATION_DATASHEET = """
+parameters:
+  temp: [-40, 27, 100]
+tests:
+  tb:
+    gain: {min: 9, max: 11, unit: dB}
+equations:
+  gain_x2: gain * 2
+reports:
+  formats: [png]
+  plots:
+    - {type: histogram, param: gain_x2, name: derived}
+"""
+
+
+@pytest.mark.parametrize("mode", [[], ["--report-only"]])
+def test_reports_can_plot_datasheet_equations(project, monkeypatch, capsys, mode):
+    """Only the GUI applied scalar equations, so a CLI report skipped the
+    histogram of gain_x2 as a missing measurement."""
+    for name in ("alpha", "beta"):
+        (project["batch"] / f"{name}.yaml").write_text(_EQUATION_DATASHEET,
+                                                       encoding="utf-8")
+    if mode:
+        _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    _code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                         "--reports", *mode, "--json")
+    for summary in lines[:-1]:
+        assert (Path(summary["reports_dir"]) / "derived.png").is_file()
+    # Saved results stay as simulated: the derived column is not persisted.
+    latest = project["out"] / "alpha" / "simulation_results.csv"
+    assert "gain_x2" not in pd.read_csv(latest).columns
 
 
 def test_report_only_without_a_finished_run_fails(project, monkeypatch, capsys):

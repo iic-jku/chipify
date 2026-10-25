@@ -361,7 +361,7 @@ class ErrorRow:
 
 #: Uppercase tokens the engines put in their messages, most specific first.
 _ERROR_KINDS = (
-    "TEMPLATE_RENDER_ERROR", "NO_MATCHING_SIGNALS", "NO_MY_DATA_FOUND",
+    "TEMPLATE_RENDER_ERROR", "CAPTURE_ERROR", "NO_MATCHING_SIGNALS", "NO_MY_DATA_FOUND",
     "RAW_PARSE_ERROR", "INVALID_OUTPUT", "MEASURE_ERROR", "ENGINE_ERROR",
     "NO_RAW_FILE", "WORKER_LOST", "TIMEOUT", "ABORTED", "CRASH",
 )

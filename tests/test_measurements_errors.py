@@ -183,6 +183,7 @@ def test_error_rows_empty_for_a_clean_run():
     ("tb: INVALID_OUTPUT(expected 2 values, got 1)", "INVALID_OUTPUT"),
     ("tb: TEMPLATE_RENDER_ERROR: 'vdd' is undefined", "TEMPLATE_RENDER_ERROR"),
     ("tb: WORKER_LOST: pool died", "WORKER_LOST"),
+    ("tb: CAPTURE_ERROR: dc produced no data - no such plot", "CAPTURE_ERROR"),
     ("tb: something unrecognised", "ERROR"),
 ])
 def test_error_kind_classification(message, kind):
@@ -363,3 +364,90 @@ def test_effective_pass_falls_back_on_legacy_frames():
     df = _dl.prepare_results(_two_tb_df().drop(
         columns=["tb_amp__error", "tb_ac__error"]))
     assert list(_dl.effective_pass(df)) == list(df["global_pass"].astype(float))
+
+
+# ── The fail-breakdown chart never calls a failed run full yield ─────────────
+
+def _fail_breakdown_text(df, stim) -> str:
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+    from chipify.plot_manager import PlotManager
+
+    fig = Figure()
+    canvas = FigureCanvasAgg(fig)
+    PlotManager.draw_adv_plot(fig, None, canvas, df, stim,
+                              "Fail Breakdown (Pie Chart)", None, None, None)
+    return " ".join(t.get_text() for ax in fig.axes for t in ax.texts)
+
+
+def test_fail_breakdown_of_an_entirely_crashed_run_is_not_full_yield():
+    """Error filtering left no counted spec failure, so the chart said
+    '100% Yield' for a run whose summary yield was 0 %."""
+    df = _two_tb_df(tb_amp_error="tb_amp: CRASH")
+    text = _fail_breakdown_text(df, _two_tb_stim())
+    assert "100%" not in text
+    assert "No usable measurements" in text
+
+
+def test_fail_breakdown_names_errored_runs_next_to_clean_specs():
+    text = _fail_breakdown_text(_two_tb_df(), _two_tb_stim())   # tb_ac errored
+    assert "100%" not in text
+    assert "2 of 2 runs errored" in text
+
+
+def test_fail_breakdown_keeps_full_yield_for_a_clean_run():
+    df = _two_tb_df(tb_ac_error="None")
+    df["sim_error"] = "None"
+    df["bw"] = [2e6, 3e6]
+    df["bw_pass"] = [True, True]
+    assert "100% Yield" in _fail_breakdown_text(df, _two_tb_stim())
+
+
+# ── Reloaded runs are graded against the current limits ──────────────────────
+
+def _saved_run():
+    """A run saved under gain <= 50: every flag says PASS."""
+    df = _two_tb_df(tb_ac_error="None")
+    df["sim_error"] = "None"
+    df["bw"] = [2e6, 3e6]
+    df["bw_pass"] = [True, True]
+    df["tb_amp_overall_pass"] = [True, True]
+    df["tb_ac_overall_pass"] = [True, True]
+    df.attrs["analysis_dirs"] = {"transient": "analysis_data/transient/x"}
+    return _dl.prepare_results(df)
+
+
+def test_regrade_matches_verdicts_to_the_current_limits():
+    """History used to show today's max of 45 next to the archived PASS of a
+    46 dB run, with zero failures."""
+    stim = _Stim([
+        _Test("tb_amp", [Value("gain", 40.0, 45.0, 42.0, "dB")]),
+        _Test("tb_ac", [Value("bw", 1e6, None, 2e6, "Hz")]),
+    ])
+    df = _dl.regrade(_saved_run(), stim)
+
+    assert list(df["gain_pass"]) == [True, False]
+    assert list(df["tb_amp_overall_pass"]) == [True, False]
+    assert list(df["tb_ac_overall_pass"]) == [True, True]
+    assert list(df["global_pass"]) == [True, False]
+    gain = _rows_by_name(df, stim)["gain"]
+    assert gain.status == meas.STATUS_FAIL and gain.fail_n == 1
+    assert df.attrs["analysis_dirs"] == {"transient": "analysis_data/transient/x"}
+
+
+def test_regrade_keeps_an_errored_testbench_failed():
+    df = _two_tb_df()                      # tb_ac errored in both runs
+    df["tb_amp_overall_pass"] = [True, True]
+    df["tb_ac_overall_pass"] = [False, False]
+    df = _dl.regrade(df, _two_tb_stim())
+    assert list(df["bw_pass"]) == [False, False]          # NaN never passes
+    assert list(df["tb_ac_overall_pass"]) == [False, False]
+    assert list(df["tb_amp_overall_pass"]) == [True, True]
+
+
+def test_regrade_ignores_measurements_the_run_never_had():
+    stim = _two_tb_stim()
+    stim.tests[0].value_lst.append(Value("new_spec", 0.0, 1.0, 0.5, "V"))
+    df = _dl.regrade(_saved_run(), stim)
+    assert "new_spec" not in df.columns and "new_spec_pass" not in df.columns
+    assert list(df["tb_amp_overall_pass"]) == [True, True]

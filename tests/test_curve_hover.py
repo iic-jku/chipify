@@ -235,6 +235,31 @@ def test_the_reported_sample_is_one_that_exists_in_the_data():
     assert any(abs(reported - float(f"{v:.4g}")) < 1e-9 for v in y)
 
 
+def test_a_dense_overlay_names_the_run_under_the_cursor():
+    """Past 120k samples the index used to stride through them, and the
+    decimated polylines cut corners: at the 500-run cap the hover named the
+    wrong run for 476 of 600 cursors placed exactly on a drawn sample."""
+    rng = np.random.default_rng(7)
+    x = np.linspace(0, 1e-3, 3000)
+    curves = {f"{k:06d}": 0.9 + 0.002 * np.cumsum(rng.standard_normal(x.size))
+              for k in range(80)}          # 240k samples: well past the old stride
+    fig, canvas = _fig()
+    ax = fig.add_subplot(111)
+    entries = [(ax.plot(x, y, linewidth=0.8)[0], (key, "v(out)"))
+               for key, y in curves.items()]
+    canvas.draw()
+    index = ch._CurveIndex(ax, entries)
+
+    wrong = 0
+    for _ in range(150):
+        k, s = int(rng.integers(len(entries))), int(rng.integers(x.size))
+        line, key = entries[k]
+        px, py = ax.transData.transform((x[s], line.get_ydata()[s]))
+        hit = index.hit(px, py)
+        wrong += hit is None or hit[1] != key
+    assert wrong == 0
+
+
 def test_the_index_survives_a_zoom_without_a_rebuild():
     fig, canvas = _fig()
     ax = fig.add_subplot(111)
@@ -541,6 +566,23 @@ def test_a_highlight_is_never_saved_into_the_blit_background():
     assert bytes(canvas.buffer_rgba()) == clean
 
 
+@pytest.mark.parametrize("fmt, dpi", [("png", 200), ("svg", None)])
+def test_an_export_does_not_replace_the_blit_background(fmt, dpi):
+    """savefig emits draw_event (PNG on this canvas at export resolution, SVG
+    from a temporary canvas); saving that frame as the background left the
+    next hover restoring a picture of the wrong size."""
+    import io
+
+    fig, canvas = _fig()
+    ax = fig.add_subplot(111)
+    line_map = _plot(ax, {("000000", "out"): (np.linspace(0, 1, 20), np.linspace(0, 1, 20))})
+    mgr = _manager(canvas, fig, ch.CurveHoverState(line_map))
+    screen = mgr._bg.get_extents()
+
+    fig.savefig(io.BytesIO(), format=fmt, dpi=dpi)
+    assert mgr._bg.get_extents() == screen
+
+
 def test_the_highlight_survives_a_rasterized_overlay():
     """Above 200 curves the plotters rasterize; draw_artist must still work."""
     fig, canvas = _fig()
@@ -591,6 +633,26 @@ def test_the_bode_map_covers_both_panes(tmp_path):
     assert {line.axes for line in line_map} == {ax_mag, ax_phase}
 
 
+def test_overlay_curves_carry_no_dead_picker(tmp_path):
+    """Nothing consumes pick events, but every click in a pane ran contains()
+    on each curve with a picker: up to 238 ms at 500 Bode runs."""
+    t = np.linspace(0, 1e-3, 20)
+    freq = np.logspace(1, 6, 20)
+    (tmp_path / "tran").mkdir()
+    (tmp_path / "ac").mkdir()
+    tran = _write_runs(tmp_path / "tran", {
+        "000000": pd.DataFrame({"time": t, "v(out)": t})})
+    ac = _write_runs(tmp_path / "ac", {
+        "000000": pd.DataFrame({"frequency": freq, "out_mag": np.ones_like(freq),
+                                "out_phase": np.zeros_like(freq)})})
+    fig, canvas = _fig()
+    lines = list(PlotManager.draw_transient_plot(fig, canvas, tran, ["000000"], ["v(out)"]))
+    fig2, canvas2 = _fig()
+    lines += list(PlotManager.draw_bode_plot(fig2, canvas2, ac, ["000000"], ["out"]))
+    assert len(lines) == 3
+    assert all(line.get_picker() is None for line in lines)
+
+
 def test_the_bubble_moves_between_the_bode_panes_without_stranding_one(tmp_path):
     freq = np.logspace(1, 6, 60)
     adir = _write_runs(tmp_path, {
@@ -629,6 +691,32 @@ def test_both_hover_managers_use_the_same_bubble_and_formatter():
     assert scatter_hover.fmt_value is hover_bubble.fmt_value is ch.fmt_value
     assert scatter_hover.ScatterHoverManager(
         None, None, lambda: None)._bubble.__class__ is hover_bubble.HoverBubble
+
+
+@pytest.mark.parametrize("ratio", [1, 2])
+@pytest.mark.parametrize("frac_y", [0.04, 0.5, 0.96])
+def test_a_tall_bubble_stays_on_the_canvas(ratio, frac_y):
+    """Logical canvas size against physical event coordinates flipped tall
+    bubbles off the canvas on HiDPI screens, and a bubble that did not fit
+    above was flipped below without checking the room there."""
+    from chipify.uikit.services.hover_bubble import HoverBubble
+
+    fig, canvas = _fig()
+    if ratio != 1:
+        canvas._set_device_pixel_ratio(ratio)
+    ax = fig.add_subplot(111)
+    canvas.draw()
+    w, h = canvas.get_width_height(physical=True)
+    event = SimpleNamespace(x=w * 0.5, y=h * frac_y)
+    xy = tuple(ax.transData.inverted().transform((event.x, event.y)))
+
+    bubble = HoverBubble(canvas, fig)
+    bubble.show(ax, xy, "\n".join(f"param_{i}: 1.234" for i in range(14)), event)
+    canvas.draw()                              # measure what is actually drawn
+    box = bubble.annot.get_bbox_patch().get_window_extent(canvas.get_renderer())
+    assert box.height < h                      # it can fit at all
+    assert -1 <= box.y0 and box.y1 <= h + 1
+    assert -1 <= box.x0 and box.x1 <= w + 1
 
 
 @pytest.mark.parametrize("module", ["curve_hover", "hover_bubble", "scatter_hover"])

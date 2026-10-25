@@ -440,7 +440,7 @@ class MainWindow(QMainWindow):
         self.set_status("Generating reports…", "yellow")
         try:
             result = report_service.generate_reports(
-                df, stim, self.current_yaml_path, settings.OUT_DIR,
+                df, stim, self._results_yaml_path(), settings.OUT_DIR,
                 duration_s=self.app_state.last_sim_duration_sec,
                 theme=self.plot_theme(), config=config,
             )
@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
     def _on_datasheet_changed(self, _text: str) -> None:
         self.refresh_history()
         self.editor_tab.load_datasheet()
+        self._load_selected_datasheet_results()
 
     def set_active_datasheet(self, name: str) -> None:
         """Rescan datasheets, select *name*, and load it into the editor."""
@@ -525,6 +526,29 @@ class MainWindow(QMainWindow):
             self.datasheet_combo.setCurrentText(name)
         self.refresh_history()
         self.editor_tab.load_datasheet()
+        self._load_selected_datasheet_results()
+
+    def _load_selected_datasheet_results(self) -> None:
+        """Show the newest run of the selected datasheet, or no results.
+
+        Switching datasheets used to keep the previous datasheet's run: every
+        tab went on showing it under the new name, and a report then paired the
+        new datasheet's path with the old run's tests.
+        """
+        self.clear_results()
+        self.history_controller.auto_load_latest()
+
+    def clear_results(self) -> None:
+        """Unload the current results; every view falls back to its empty state."""
+        self.app_state.current_df = None
+        self.app_state.current_stim = None
+        self.app_state.derived_cols = []
+        self.app_state.data_changed.emit(df=None, stim=None, switch_tab=False)
+
+    def _results_yaml_path(self) -> str | None:
+        """The datasheet the loaded results were parsed from (else the selected one)."""
+        stim = self.app_state.current_stim
+        return getattr(stim, "yaml_path", "") or self.current_yaml_path
 
     # ── Results surface (called by controllers) ───────────────────────────────
 
@@ -554,17 +578,23 @@ class MainWindow(QMainWindow):
         """Re-run the current results through ``show_results`` to refresh
         derived columns after the equation list changes.
 
-        The stim is re-parsed from the active datasheet first — equations live
-        in the datasheet YAML, so the in-memory stim would otherwise keep
+        The stim is re-parsed from the results' datasheet first — equations
+        live in the datasheet YAML, so the in-memory stim would otherwise keep
         serving the pre-edit equation list."""
         df = self.app_state.current_df
         if df is None:
             return
+        # Start again from the results as simulated: a removed equation, or
+        # one whose new expression fails, would otherwise keep its old column.
+        # Equations only ever add columns, so dropping them restores the frame.
+        df = df.drop(columns=[c for c in self.app_state.derived_cols
+                              if c in df.columns])
         stim = self.app_state.current_stim
-        if self.current_yaml_path:
+        yaml_path = self._results_yaml_path()
+        if yaml_path:
             try:
                 from chipify import util
-                stim = util.Stimuli(self.current_yaml_path)
+                stim = util.Stimuli(yaml_path)
             except Exception as exc:  # noqa: BLE001 — keep the old stim on parse errors
                 log.warning("reapply_equations: could not re-parse datasheet: %s", exc)
         self.show_results(df, stim, switch_tab=False)

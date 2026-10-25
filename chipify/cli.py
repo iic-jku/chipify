@@ -26,6 +26,22 @@ def _json_summary(df, yaml_name: str, duration_s: float) -> dict:
     }
 
 
+def _with_scalar_equations(df, stim):
+    """Add the datasheet's scalar-equation columns, as the GUI does on load.
+
+    Without them a report plot of a derived quantity was skipped as a missing
+    measurement here while the GUI drew it. Applied after the result CSVs are
+    written, so saved results stay as simulated, like the GUI's.
+    """
+    from chipify.uikit.services import equation_service as _eq
+    df, _derived, lines = _eq.apply_scalar_equations(df, _eq.scalar_equations(stim))
+    for line in lines:
+        if line.startswith("[✗]"):
+            # ASCII only: a Windows console cannot print the service's arrows.
+            print(f"[!] Equation skipped: {line[4:].replace('→', '->')}")
+    return df
+
+
 def _generate_reports(df, stim, yaml_path, out_dir, duration_s):
     """Write the datasheet's configured plots/reports; return the ReportResult."""
     from chipify import report_service
@@ -118,25 +134,32 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
     analysis_dirs = df.attrs.get("analysis_dirs", {}) or {}
     simulator.write_analysis_pointers(analysis_dirs, out_dir)
 
+    from chipify import data_loader as _dl
+    from chipify import run_meta
+    s = _dl.result_summary(_dl.prepare_results(df))
+    meta_kwargs = dict(yaml_name=yaml_path.name,
+                       duration_s=duration_s, total_runs=s.total,
+                       valid_runs=s.valid, global_yield=round(s.yield_pct, 2),
+                       tran_dir=analysis_dirs.get("transient", ""),
+                       analysis_dirs=analysis_dirs)
+    # The latest CSV needs its own sidecar, as the GUI writes one. Without it,
+    # a sidecar left by an earlier GUI run described these results: another
+    # datasheet's identity and another run's waveform directories.
+    run_meta.write_meta(csv_out, **meta_kwargs)
+
     # Save history copy + sidecar metadata
     try:
         import datetime
-        from chipify import run_meta
         history_dir = out_dir / "history"
         history_dir.mkdir(parents=True, exist_ok=True)
         ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         hist = history_dir / f"run_{ts}.csv"
         df.to_csv(hist, index=False)
-        from chipify import data_loader as _dl
-        s = _dl.result_summary(_dl.prepare_results(df))
-        run_meta.write_meta(hist, yaml_name=yaml_path.name,
-                            duration_s=duration_s, total_runs=s.total,
-                            valid_runs=s.valid, global_yield=round(s.yield_pct, 2),
-                            tran_dir=analysis_dirs.get("transient", ""),
-                            analysis_dirs=analysis_dirs)
+        run_meta.write_meta(hist, **meta_kwargs)
     except Exception as exc:
         print(f"[!] Could not save history: {exc}")
 
+    df = _with_scalar_equations(df, stim)
     print_summary(df, stim)
 
     summary = _json_summary(df, yaml_path.name, duration_s)
@@ -170,9 +193,11 @@ def _load_finished_run(yaml_path: str | os.PathLike[str], *,
         print(f"[-] No finished run of {yaml_path.name} in {out_dir / 'history'}")
         return None
     csv_path = out_dir / "history" / runs[0]
-    df = _dl.load_csv(str(csv_path))  # also restores the run's waveform dirs
-    duration_s = run_meta.read_meta(csv_path).get("duration_s")
     stim = util.Stimuli(yaml_path)
+    # load_csv also restores the run's waveform dirs. The report prints the
+    # datasheet's current limits, so the verdicts are graded against them.
+    df = _with_scalar_equations(_dl.regrade(_dl.load_csv(str(csv_path)), stim), stim)
+    duration_s = run_meta.read_meta(csv_path).get("duration_s")
     print(f"[+] Using {csv_path}")
 
     summary = _json_summary(df, yaml_path.name, duration_s or 0.0)
@@ -335,18 +360,28 @@ def main():
             # overwrite each other's simulation_results.csv.
             stem = yaml_path.stem
             run_out_dir = Path(settings.OUT_DIR) / stem
-            if args.report_only:
-                entry = _load_finished_run(yaml_path, out_dir=run_out_dir,
-                                           json_out=args.json)
-            else:
-                entry = _run_single(yaml_path, json_out=args.json,
-                                    simulator_override=args.simulator,
-                                    templates_dir=args.templates_dir,
-                                    progress_stream=args.progress_stream,
-                                    out_dir=run_out_dir, reports=args.reports)
+            error = "no finished run" if args.report_only else "no data"
+            try:
+                if args.report_only:
+                    entry = _load_finished_run(yaml_path, out_dir=run_out_dir,
+                                               json_out=args.json)
+                else:
+                    entry = _run_single(yaml_path, json_out=args.json,
+                                        simulator_override=args.simulator,
+                                        templates_dir=args.templates_dir,
+                                        progress_stream=args.progress_stream,
+                                        out_dir=run_out_dir, reports=args.reports)
+            except Exception as exc:  # noqa: BLE001 — one bad datasheet must not end the batch
+                # The datasheet is parsed before _run_single's own guard: a
+                # malformed YAML ended the whole batch, so every later datasheet
+                # and the batch summary were skipped.
+                logging.getLogger("chipify.cli").exception(
+                    "Batch entry %s failed", yaml_path.name)
+                entry = None
+                error = " ".join(str(exc).split())[:200] or type(exc).__name__
+                print(f"[-] {yaml_path.name}: {error}")
             if entry is None:
                 all_ok = False
-                error = "no finished run" if args.report_only else "no data"
                 entry = report_service.BatchEntry(
                     yaml_path, run_out_dir, error=error,
                     summary={"yaml": yaml_path.name, "error": error})

@@ -91,6 +91,29 @@ def test_scalar_multiple_equations(sim_df: pd.DataFrame) -> None:
     assert len(derived) == 2
 
 
+@pytest.mark.parametrize("name", ["p_out", "p_in", "sim_error"])
+def test_scalar_equation_cannot_replace_an_existing_column(
+    sim_df: pd.DataFrame, name: str,
+) -> None:
+    """An equation named like a measurement replaced the measured value while
+    the measurement kept its pass flags (and the run its yield)."""
+    eqs = [{"name": name, "expr": "p_in * 10"}]
+    df_out, derived, log_lines = apply_scalar_equations(sim_df, eqs)
+    pd.testing.assert_series_equal(df_out[name], sim_df[name])
+    assert derived == []
+    assert any("[✗]" in line and "already exists" in line for line in log_lines)
+
+
+def test_scalar_duplicate_equation_name_keeps_the_first(sim_df: pd.DataFrame) -> None:
+    eqs = [
+        {"name": "eff", "expr": "p_out / p_in"},
+        {"name": "eff", "expr": "p_in * 99"},
+    ]
+    df_out, derived, _ = apply_scalar_equations(sim_df, eqs)
+    assert list(df_out["eff"]) == pytest.approx([0.5, 0.5, 0.5])
+    assert derived == ["eff"]
+
+
 # ── apply_transient_equations ─────────────────────────────────────────────────
 
 @pytest.fixture

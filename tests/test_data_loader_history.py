@@ -104,3 +104,36 @@ def test_latest_with_mismatching_meta_is_hidden(tmp_path) -> None:
 
 def test_empty_out_dir(tmp_path) -> None:
     assert list_history_runs(str(tmp_path)) == []
+
+
+def _batch_runs(out_dir: str) -> None:
+    """amp's --batch runs, under out/amp/history (one mis-attributed)."""
+    batch_dir = os.path.join(out_dir, "amp", "history")
+    os.makedirs(batch_dir)
+    _make_run(batch_dir, "run_20260602_120000.csv", "amp.yaml")
+    _make_run(batch_dir, "run_20260605_120000.csv", "amp.yaml")
+    _make_run(batch_dir, "run_20260606_120000.csv", "filter.yaml")
+
+
+def test_batch_runs_are_listed_newest_first_with_the_others(tmp_path) -> None:
+    """The GUI scanned only out/history, so --batch runs never showed up."""
+    from chipify.data_loader import resolve_csv_path
+
+    out_dir = _setup_out_dir(tmp_path, with_latest=False)
+    _batch_runs(out_dir)
+    runs = list_history_runs(out_dir, yaml_name="amp.yaml", include_batch=True)
+    assert runs == [
+        "amp/run_20260605_120000.csv",
+        "run_20260604_100000.csv",
+        "amp/run_20260602_120000.csv",
+        "run_20260601_100000.csv",
+    ]
+    assert resolve_csv_path(runs[0], out_dir) == os.path.join(
+        out_dir, "amp", "history", "run_20260605_120000.csv")
+
+
+def test_batch_runs_are_opt_in(tmp_path) -> None:
+    """--report-only lists a batch root itself and must not change."""
+    out_dir = _setup_out_dir(tmp_path, with_latest=False)
+    _batch_runs(out_dir)
+    assert not any("/" in r for r in list_history_runs(out_dir, yaml_name="amp.yaml"))

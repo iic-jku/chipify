@@ -176,12 +176,16 @@ def _eval_measure_expr(expr: str, results: dict):
     return default_evaluator.evaluate_spice_measure(expr, results)
 
 
-def _vacask_write_analysis_tabs(buckets: dict, test, analysis_tab_paths: dict) -> None:
+def _vacask_write_analysis_tabs(buckets: dict, test, analysis_tab_paths: dict,
+                                errors: dict | None = None) -> None:
     """For every declared analysis on *test*, ask it to serialise its signals
     from the matching .raw bucket into the worker-private tab file path.
 
     *buckets* is the per-kind dict returned by ``read_raw_file``.
     *analysis_tab_paths* is ``{kind: tab_path}`` from the worker driver.
+    *errors*, when given, receives ``{kind: reason}`` for every tab that could
+    not be written. Worker logging does not reach chipify.log, so without it
+    the orchestrator only sees a missing tab, not which signal was missing.
     """
     if not buckets or not analysis_tab_paths:
         return
@@ -193,10 +197,13 @@ def _vacask_write_analysis_tabs(buckets: dict, test, analysis_tab_paths: dict) -
                 an.write_tab_from_raw(bucket, tab)
             except Exception as exc:
                 log.warning("write_tab_from_raw failed for %s: %s", an.kind, exc)
+                if errors is not None:
+                    errors[an.kind] = str(exc)
 
 
 def _vacask_extract_results(raw_file: str | os.PathLike[str], test,
-                            analysis_tab_paths: dict):
+                            analysis_tab_paths: dict,
+                            capture_errors: dict | None = None):
     """Read VACASK .raw output, extract scalars, return (MY_DATA line, error).
 
     Scalar extraction order (first match wins for each value):
@@ -221,7 +228,8 @@ def _vacask_extract_results(raw_file: str | os.PathLike[str], test,
              {k: sorted(v.keys()) for k, v in buckets.items()})
 
     # Persist every declared analysis to its worker-private tab file.
-    _vacask_write_analysis_tabs(buckets, test, analysis_tab_paths or {})
+    _vacask_write_analysis_tabs(buckets, test, analysis_tab_paths or {},
+                                errors=capture_errors)
 
     # Scalar values are evaluated against the transient bucket only.
     # (matches the "Transient only" measure-source choice in the design.)
@@ -302,6 +310,7 @@ class VacaskSimulator(BaseSimulator):
 
     def __init__(self) -> None:
         self._last_log_tail = ""
+        self._capture_errors: dict[str, str] = {}
 
     def stage_extra_files(self) -> None:
         """Mirror the PDK's *.osdi compact-model objects into FAST_TMP.
@@ -391,6 +400,8 @@ class VacaskSimulator(BaseSimulator):
             test=None, analysis_tab_paths: dict | None = None) -> tuple:
         cfg = app_config.load_config()
         analysis_tab_paths = analysis_tab_paths or {}
+        # The engine is reused across a worker's batch: start every run clean.
+        self._capture_errors = {}
         vacask_binary = cfg.get("vacask_binary") or "vacask"
         custom_env = os.environ.copy()
         custom_env["OMP_NUM_THREADS"] = "1"
@@ -482,13 +493,16 @@ class VacaskSimulator(BaseSimulator):
                 if analysis_tab_paths and temp_raw_file is not None and temp_raw_file.exists():
                     buckets = _read_raw_file(str(temp_raw_file))
                     _vacask_write_analysis_tabs(buckets or {}, test,
-                                                analysis_tab_paths)
+                                                analysis_tab_paths,
+                                                errors=self._capture_errors)
                 return my_data_line, None
 
             # ── Fallback: extract scalars from .raw file ──────────────────────
             # Used when the testbench saves named meas results or the YAML
             # defines explicit measure: expressions.
-            return _vacask_extract_results(temp_raw_file or "", test, analysis_tab_paths)
+            return _vacask_extract_results(temp_raw_file or "", test,
+                                           analysis_tab_paths,
+                                           capture_errors=self._capture_errors)
 
         except subprocess.CalledProcessError:
             err_msg = "CRASH"
@@ -544,6 +558,10 @@ class VacaskSimulator(BaseSimulator):
         worker-private workdir is deleted)."""
         lines = self._last_log_tail.splitlines()
         return "\n".join(lines[-n_lines:]).strip()
+
+    def capture_error(self, kind: str) -> str:
+        """Why the most recent run wrote no *kind* tab (e.g. a missing signal)."""
+        return self._capture_errors.get(kind, "")
 
     @staticmethod
     def _preserve_vacask_log(temp_log_file: str | os.PathLike[str], reason: str) -> str:

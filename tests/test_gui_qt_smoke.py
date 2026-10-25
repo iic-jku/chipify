@@ -373,6 +373,87 @@ def test_generate_reports_button(window, monkeypatch, tmp_path):
     assert "info" in seen and "1 file(s)" in seen["info"]
 
 
+def _alpha_loaded_beta_without_runs(window, monkeypatch, tmp_path):
+    """alpha.yaml has one saved run and is selected; beta.yaml has none."""
+    from chipify import run_meta, settings
+
+    ds_dir = tmp_path / "datasheets"
+    ds_dir.mkdir()
+    for name in ("alpha", "beta"):
+        (ds_dir / f"{name}.yaml").write_text(
+            "parameters:\n  temp: [27]\n"
+            "tests:\n  tb_x:\n    gain: {min: 9.0, max: 11.0}\n", encoding="utf-8")
+    hist = tmp_path / "out" / "history" / "run_20260101_000000.csv"
+    hist.parent.mkdir(parents=True)
+    _sample_df().to_csv(hist, index=False)
+    run_meta.write_meta(hist, yaml_name="alpha.yaml")
+    monkeypatch.setattr(settings, "IN_DIR", str(ds_dir))
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path / "out"))
+
+    window.set_active_datasheet("alpha.yaml")
+    assert window.app_state.current_stim.yaml_path.endswith("alpha.yaml")
+
+
+def test_switching_datasheets_does_not_keep_the_previous_results(
+    window, monkeypatch, tmp_path,
+):
+    """alpha's run stayed on screen under beta's name."""
+    _alpha_loaded_beta_without_runs(window, monkeypatch, tmp_path)
+
+    window.datasheet_combo.setCurrentText("beta.yaml")
+    window._on_datasheet_changed("beta.yaml")
+    assert window.app_state.current_df is None
+    assert window.app_state.current_stim is None
+
+    window.datasheet_combo.setCurrentText("alpha.yaml")
+    window._on_datasheet_changed("alpha.yaml")
+    assert len(window.app_state.current_df) == len(_sample_df())
+    assert window.app_state.current_stim.yaml_path.endswith("alpha.yaml")
+
+
+def test_a_batch_run_shows_up_in_the_history_and_loads(window, monkeypatch, tmp_path):
+    """--batch keeps runs under out/<stem>/history, where the GUI never looked."""
+    from chipify import run_meta, settings
+
+    ds_dir = tmp_path / "datasheets"
+    ds_dir.mkdir()
+    (ds_dir / "alpha.yaml").write_text(
+        "parameters:\n  temp: [27]\ntests:\n  tb_x:\n    gain: {min: 9.0, max: 11.0}\n",
+        encoding="utf-8")
+    hist = tmp_path / "out" / "alpha" / "history" / "run_20260101_000000.csv"
+    hist.parent.mkdir(parents=True)
+    _sample_df().to_csv(hist, index=False)
+    run_meta.write_meta(hist, yaml_name="alpha.yaml")
+    monkeypatch.setattr(settings, "IN_DIR", str(ds_dir))
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path / "out"))
+
+    window.set_active_datasheet("alpha.yaml")
+    assert window.history_combo.itemText(0) == "alpha/run_20260101_000000.csv"
+    assert len(window.app_state.current_df) == len(_sample_df())
+
+
+def test_reports_name_the_datasheet_of_the_loaded_run(window, monkeypatch, tmp_path):
+    """A report paired the selected datasheet's path with the loaded run's
+    tests. The selection can still change without a reload (the rescan button
+    resets the combo), so the report follows the results."""
+    from PySide6.QtWidgets import QMessageBox
+    from chipify import report_service
+
+    _alpha_loaded_beta_without_runs(window, monkeypatch, tmp_path)
+    window.datasheet_combo.setCurrentText("beta.yaml")      # no reload
+
+    seen = {}
+
+    def fake_generate(df, stim, yaml_path, out_dir, **_kw):
+        seen["yaml"] = yaml_path
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(report_service, "generate_reports", fake_generate)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: None)
+    window._run_report_job()
+    assert seen["yaml"].endswith("alpha.yaml")
+
+
 def test_pdf_export_is_not_a_separate_path(window):
     """The PDF button was a duplicate of the report job; it must stay gone."""
     assert not hasattr(window, "export_pdf")
@@ -686,6 +767,78 @@ def test_equations_tab_applies_derived_column(window, monkeypatch, tmp_path):
     assert window.histogram_tab.param_combo.findText("gain2") >= 0
     # And it was persisted into the datasheet YAML.
     assert "gain2" in ds.read_text(encoding="utf-8")
+
+
+def _equations_panel_with_gain2(window, monkeypatch, tmp_path):
+    """Results loaded and the scalar equation gain2 = gain * 2 applied."""
+    from chipify import app_config
+    store = {"custom_equations": []}
+    monkeypatch.setattr(app_config, "load_config", lambda: dict(store))
+    monkeypatch.setattr(app_config, "save_config", lambda cfg: store.update(cfg))
+    ds = tmp_path / "ds.yaml"
+    ds.write_text(
+        "parameters:\n  temp: [27]\n"
+        "tests:\n  tb_x:\n    gain:\n      min: 9.0\n      max: 11.0\n",
+        encoding="utf-8",
+    )
+    _select_datasheet(window, monkeypatch, ds)
+    window.editor_tab.load_datasheet()
+    window.show_results(_sample_df(), _FakeStim(), switch_tab=False)
+    eq = window.equations_tab
+    eq.mode_combo.setCurrentText("Scalar")
+    eq._append_row("gain2", "gain * 2")
+    eq._apply()
+    assert "gain2" in window.app_state.current_df.columns
+    return eq
+
+
+def test_history_run_is_graded_against_the_current_limits(window, monkeypatch, tmp_path):
+    """A reloaded run kept its archived pass flags while the table showed the
+    datasheet's current limits: 10.2 under a max of 10.1 read PASS."""
+    from chipify import settings
+    from chipify.uikit.services import measurements as meas
+
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path))
+    (tmp_path / "history").mkdir()
+    saved = _sample_df()
+    saved["gain_pass"] = True                     # graded under a wider max
+    saved.to_csv(tmp_path / "history" / "run_20260101_000000.csv", index=False)
+    ds = tmp_path / "ds.yaml"
+    ds.write_text("parameters:\n  temp: [27]\n"
+                  "tests:\n  tb_x:\n    gain: {min: 9.0, max: 10.1}\n",
+                  encoding="utf-8")
+    _select_datasheet(window, monkeypatch, ds)
+
+    window.history_controller.on_select("run_20260101_000000.csv", switch_tab=False)
+
+    df = window.app_state.current_df
+    assert list(df["gain_pass"]) == [True, False, False, True]
+    row = meas.measurement_rows(df, window.app_state.current_stim)[0]
+    assert row.status == meas.STATUS_FAIL and row.fail_n == 2
+
+
+def test_removed_equation_takes_its_column_with_it(window, monkeypatch, tmp_path):
+    """Removing an equation cleared the derived-name list but its column stayed
+    in the results, still offered to every plot."""
+    eq = _equations_panel_with_gain2(window, monkeypatch, tmp_path)
+    eq.table.selectRow(0)
+    eq._remove_selected()
+
+    assert "gain2" not in window.app_state.current_df.columns
+    assert window.app_state.derived_cols == []
+    assert window.histogram_tab.param_combo.findText("gain2") < 0
+
+
+def test_equation_whose_new_expression_fails_drops_its_old_column(
+    window, monkeypatch, tmp_path,
+):
+    eq = _equations_panel_with_gain2(window, monkeypatch, tmp_path)
+    eq.table.item(0, 1).setText("no_such_column * 2")
+    eq._apply()
+
+    assert "gain2" not in window.app_state.current_df.columns
+    # The measured columns themselves survive the re-application.
+    assert list(window.app_state.current_df["gain"]) == list(_sample_df()["gain"])
 
 
 def test_deferred_runs_on_next_tick(qt_app):

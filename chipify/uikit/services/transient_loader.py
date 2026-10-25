@@ -208,19 +208,27 @@ def resolve_analysis_dir(df: pd.DataFrame, out_dir: str | os.PathLike[str],
        legacy ``{out_dir}/tran_data/.latest`` for transient).
     5. Newest sub-directory under ``{out_dir}/analysis_data/{kind}/``.
     6. (transient only) newest sub-directory under the legacy ``{out_dir}/tran_data/``.
+
+    Steps 4-6 are guesses for runs that recorded no waveform directories at
+    all. A run that recorded them is authoritative: when its directory for
+    *kind* is gone (or it never captured *kind*), the result is ``""``. The
+    guesses used to substitute a newer run's curves without any warning.
     """
     out_path = Path(out_dir)
+    recorded = False
 
     # 1. DataFrame attribute set by the live simulation run.
     if hasattr(df, "attrs"):
         adirs = df.attrs.get("analysis_dirs", {})
-        if isinstance(adirs, dict):
+        if isinstance(adirs, dict) and adirs:
+            recorded = True
             d = str(adirs.get(kind, "") or "")
             if d and Path(d).is_dir():
                 return d
         # 2. Back-compat alias for transient.
         if kind == "transient":
             d = str(df.attrs.get("tran_dir", "") or "")
+            recorded = recorded or bool(d)
             if d and Path(d).is_dir():
                 return d
 
@@ -231,12 +239,18 @@ def resolve_analysis_dir(df: pd.DataFrame, out_dir: str | os.PathLike[str],
                       if isinstance(meta_adirs, dict) else ""]
         if kind == "transient":
             candidates.append(str(meta.get("tran_dir", "") or ""))
+        recorded = recorded or bool(isinstance(meta_adirs, dict) and meta_adirs)
         for d in candidates:
             if not d:
                 continue
+            recorded = True
             p = Path(d) if Path(d).is_absolute() else out_path / d
             if p.is_dir():
                 return str(p)
+
+    if recorded:
+        log.debug("No %s waveform directory left for this run.", kind)
+        return ""
 
     # 4. Pointer files.
     pointers = [out_path / "analysis_data" / kind / ".latest"]

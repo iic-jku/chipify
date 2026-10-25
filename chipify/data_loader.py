@@ -53,6 +53,12 @@ TB_ERROR_SUFFIX = "__error"
 #: Value meaning "no error" in every error column.
 NO_ERROR = "None"
 
+#: Per-run columns chipify writes into every results frame itself. A datasheet
+#: name equal to one of them would overwrite it.
+RESERVED_COLUMNS = frozenset({
+    "sim_error", "run_id", "global_pass", "simulation_duration_s_total",
+})
+
 
 def tb_error_col(tb_path: str) -> str:
     """Name of the per-testbench error column for *tb_path*."""
@@ -270,6 +276,37 @@ def compute_global_pass(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def regrade(df: pd.DataFrame, stim: Any) -> pd.DataFrame:
+    """Recompute every verdict of a saved run against *stim*'s current limits.
+
+    A saved run carries the pass flags of the limits it was simulated with,
+    but every view shows the limits of the datasheet as it is now: a reloaded
+    run paired a value above today's maximum with PASS and zero failures.
+    Regrading keeps limits and verdicts in step, with the simulator's own
+    rules: a value passes when ``Value.isPass`` says so (NaN never does), a
+    testbench when it completed and all of its graded values passed.
+
+    Only verdict columns the run actually has are rewritten; a measurement or
+    testbench added to the datasheet after the run has no data to grade.
+    """
+    df = df.copy()
+    for test in getattr(stim, "tests", None) or []:
+        tb = str(getattr(test, "tb_path", "") or "")
+        tb_passed = tb_ok_mask(df, tb)
+        for val_obj in getattr(test, "value_lst", None) or []:
+            name = str(val_obj.name)
+            if name not in df.columns:
+                continue
+            values = pd.to_numeric(df[name], errors="coerce")
+            passed = values.map(val_obj.isPass).astype(bool)
+            if f"{name}_pass" in df.columns:
+                df[f"{name}_pass"] = passed
+            tb_passed = tb_passed & passed
+        if tb + TB_PASS_SUFFIX in df.columns:
+            df[tb + TB_PASS_SUFFIX] = tb_passed
+    return compute_global_pass(df)
+
+
 def prepare_results(df: pd.DataFrame) -> pd.DataFrame:
     """Normalise ``sim_error`` and (re)compute ``global_pass`` in one call.
 
@@ -360,6 +397,10 @@ def resolve_csv_path(selection: str, out_dir: str | os.PathLike[str]) -> str | N
     out = Path(out_dir)
     if selection == "Latest (simulation_results)":
         path = out / "simulation_results.csv"
+    elif "/" in selection:
+        # "<stem>/run_<ts>.csv": a batch run, kept under out/<stem>/history.
+        stem, name = selection.split("/", 1)
+        path = out / stem / "history" / name
     else:
         path = out / "history" / selection
     return str(path) if path.exists() else None
@@ -386,7 +427,8 @@ def load_csv(csv_path: str) -> pd.DataFrame:
 
 
 def list_history_runs(out_dir: str | os.PathLike[str],
-                      yaml_name: str | None = None) -> list[str]:
+                      yaml_name: str | None = None, *,
+                      include_batch: bool = False) -> list[str]:
     """
     Return run labels for the history dropdown, newest first.
 
@@ -397,6 +439,10 @@ def list_history_runs(out_dir: str | os.PathLike[str],
     metadata are hidden. "Latest" is held to the same standard when its
     sidecar attributes it to a datasheet, but stays visible when it has no
     (or pre-sidecar) metadata — it is the live run, not archive clutter.
+
+    With *include_batch* (and a *yaml_name*), the datasheet's ``--batch`` runs
+    are listed too, as ``<stem>/run_<ts>.csv``: batch mode keeps them under
+    ``out_dir/<stem>/history``, where the GUI never looked.
     """
     from chipify import run_meta
 
@@ -408,15 +454,21 @@ def list_history_runs(out_dir: str | os.PathLike[str],
         if not yaml_name or not latest_yaml or latest_yaml == yaml_name:
             runs.append("Latest (simulation_results)")
 
-    history_dir = out / "history"
-    if history_dir.exists():
-        hist_files = sorted(history_dir.glob("run_*.csv"),
-                            key=lambda p: p.name, reverse=True)
+    sources = [("", out / "history")]
+    if include_batch and yaml_name:
+        stem = Path(yaml_name).stem
+        sources.append((f"{stem}/", out / stem / "history"))
+    hist: list[tuple[str, Path]] = []
+    for prefix, history_dir in sources:
+        if not history_dir.exists():
+            continue
+        files = list(history_dir.glob("run_*.csv"))
         if yaml_name:
-            hist_files = [
-                f for f in hist_files
-                if run_meta.read_meta(f).get("yaml") == yaml_name
-            ]
-        runs.extend(f.name for f in hist_files)
+            files = [f for f in files
+                     if run_meta.read_meta(f).get("yaml") == yaml_name]
+        hist.extend((prefix, f) for f in files)
+    # Newest first across both folders: the names carry the timestamp.
+    hist.sort(key=lambda entry: entry[1].name, reverse=True)
+    runs.extend(prefix + f.name for prefix, f in hist)
 
     return runs

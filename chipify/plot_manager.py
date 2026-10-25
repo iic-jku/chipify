@@ -540,15 +540,30 @@ class PlotManager:
             # A crashed testbench sets every one of its *_pass flags False, and
             # counting those would report a broken schematic as a spec failure.
             fail_counts = {}
+            n_usable = 0
             for col in pass_cols:
                 name = col[: -len('_pass')]
                 usable = _dl.plot_rows(valid_df, current_stim, [name])
+                n_usable += len(usable)
                 n_fail = int((usable[col] == False).sum())
                 if n_fail:
                     fail_counts[name] = n_fail
 
             if not fail_counts:
-                ax.text(0.5, 0.5, "100% Yield! No failures to analyze.", color='#2ecc71', ha='center', va='center', fontsize=14, weight='bold')
+                # No failing spec is not full yield: a run where everything
+                # crashed has no spec failures either, and its summary says 0 %.
+                n_err = len(valid_df) - len(_dl.valid_rows(valid_df))
+                if not pass_cols:
+                    msg, color = "No measurements with specs to analyze.", fg
+                elif not n_usable:
+                    msg, color = "No usable measurements: every run errored.", '#e74c3c'
+                elif n_err:
+                    msg = (f"No spec failures in the usable runs\n"
+                           f"({n_err} of {len(valid_df)} runs errored).")
+                    color = '#f39c12'
+                else:
+                    msg, color = "100% Yield! No failures to analyze.", '#2ecc71'
+                ax.text(0.5, 0.5, msg, color=color, ha='center', va='center', fontsize=14, weight='bold')
                 ax.axis('off')
             else:
                 labels, sizes = list(fail_counts.keys()), list(fail_counts.values())
@@ -723,8 +738,7 @@ class PlotManager:
                     continue
                 lines = ax.plot(x, df[sig], color=style.color(run_id, sig),
                                 linestyle=style.linestyle(sig), alpha=alpha,
-                                linewidth=0.8, rasterized=(n_curves > 200),
-                                picker=4)
+                                linewidth=0.8, rasterized=(n_curves > 200))
                 if lines:
                     line_map[lines[0]] = (run_id, sig)
                 drawn_any = True
@@ -951,14 +965,16 @@ class PlotManager:
                 mag_db = 20.0 * np.log10(np.maximum(np.abs(df[mag_col].values), 1e-30))
                 lines = ax_mag.plot(freq, mag_db, color=color, linestyle=ls,
                                     alpha=alpha, linewidth=0.8,
-                                    rasterized=(n_curves > 200), picker=4)
+                                    rasterized=(n_curves > 200))
                 if lines:
                     line_map[lines[0]] = (run_id, f"{sig} (mag)")
                 # The phase pane is half the plot; registering its lines too is
                 # what makes hovering there identify a run (see curve_hover).
+                # No `picker`: nothing handles pick events, yet matplotlib ran
+                # contains() on every picker curve per click (238 ms at 500).
                 ph_lines = ax_phase.plot(freq, df[ph_col], color=color, linestyle=ls,
                                          alpha=alpha, linewidth=0.8,
-                                         rasterized=(n_curves > 200), picker=4)
+                                         rasterized=(n_curves > 200))
                 if ph_lines:
                     line_map[ph_lines[0]] = (run_id, f"{sig} (phase)")
                 drawn_any = True

@@ -50,11 +50,13 @@ HIT_RADIUS_PX = 8.0
 HIGHLIGHT_WIDTH_FACTOR = 2.5
 HIGHLIGHT_MIN_WIDTH = 2.0
 
-#: Samples kept across all curves of one axes. A 500-run transient overlay is
-#: millions of points; above this the index strides through them, so the
-#: reported sample is the nearest *indexed* one. 120k keeps a hover under a
-#: few milliseconds while staying far denser than one point per pixel.
-MAX_INDEX_POINTS = 120_000
+#: Chunks the segments of one axes are grouped into for the coarse pass of a
+#: hit test. A 500-run transient overlay is millions of segments; each motion
+#: event tests at most this many chunk bounding boxes, then measures only the
+#: segments of the chunks near the cursor. The index used to *stride* through
+#: the samples instead, and the decimated polylines cut corners: at 500 runs
+#: the hover named the wrong run for 476 of 600 cursors placed on a curve.
+MAX_INDEX_CHUNKS = 120_000
 
 #: Fallback when the hovered axes carries no x label of its own.
 _X_FALLBACK = "x"
@@ -147,6 +149,8 @@ def _scale_space(axis, raw):
     """
     raw = np.asarray(raw, dtype=float)
     ok = np.isfinite(raw)
+    if axis.get_scale() == "linear":
+        return raw, ok      # the identity transform: skip it at millions of samples
     if axis.get_scale() == "log":
         ok &= raw > 0.0
     out = np.full(raw.shape, np.nan)
@@ -162,6 +166,12 @@ class _CurveIndex:
     Holds each curve's samples in scale space (view-independent) plus their raw
     values for display. ``hit()`` applies only the remaining affine, so pan and
     zoom cost nothing; a change of axis *scale* does invalidate it.
+
+    Every sample is kept. Consecutive segments are grouped into chunks with a
+    scale-space bounding box, so a hit test first rejects the chunks whose box
+    is out of reach and measures the exact distance only to the segments of
+    the rest: the same answer as measuring every segment, at a fraction of the
+    cost.
     """
 
     def __init__(self, ax, entries):
@@ -172,41 +182,36 @@ class _CurveIndex:
         # Parallel to keys, and NOT to entries: a curve with nothing finite in
         # it is drawn but indexed away, so the two lists drift apart.
         self.lines: list = []
-        self._matrix = None
-        self._px = self._py = None
-
-        total = 0
-        for line, _key in self.entries:
-            total += len(line.get_xdata(orig=False))
-        stride = max(1, -(-total // MAX_INDEX_POINTS)) if total else 1
 
         sx, sy, raw_x, raw_y, owner, pos = [], [], [], [], [], []
         for line, key in self.entries:
-            xy = np.asarray(line.get_xydata(), dtype=float)
-            if xy.size == 0:
+            sel = np.asarray(line.get_xydata(), dtype=float)
+            if sel.size == 0:
                 continue
-            sel = xy[::stride]
             xs, xok = _scale_space(ax.xaxis, sel[:, 0])
             ys, yok = _scale_space(ax.yaxis, sel[:, 1])
             ok = xok & yok
             n = int(ok.sum())
             if n == 0:
                 continue          # an all-NaN curve is drawn but not hoverable
-            take = np.flatnonzero(ok)
             if n == 1:
                 # Duplicated into a zero-length segment: the segment pass is
                 # the only hit test, and a lone sample would otherwise be
                 # unreachable. The positions must stay adjacent for it to
                 # survive the break filter below.
-                take = take[[0, 0]]
+                take = np.flatnonzero(ok)[[0, 0]]
                 at = np.array([0, 1], dtype=np.int64)
+            elif n == len(ok):
+                take = slice(None)      # every sample usable: views, no copies
+                at = np.arange(n, dtype=np.int64)
             else:
+                take = np.flatnonzero(ok)
                 at = take.astype(np.int64)
             sx.append(xs[take])
             sy.append(ys[take])
             raw_x.append(sel[take, 0])
             raw_y.append(sel[take, 1])
-            owner.append(np.full(len(take), len(self.keys), dtype=np.int32))
+            owner.append(np.full(len(at), len(self.keys), dtype=np.int32))
             pos.append(at)
             self.keys.append(key)
             self.lines.append(line)
@@ -217,6 +222,8 @@ class _CurveIndex:
             self.owner = np.empty(0, dtype=np.int32)
             self.pos = np.empty(0, dtype=np.int64)
             self.seg = np.empty(0, dtype=np.int64)
+            self._box = np.empty((4, 0))
+            self._seg_at = np.zeros(1, dtype=np.int64)
             return
 
         self.xs = np.concatenate(sx)
@@ -234,6 +241,36 @@ class _CurveIndex:
         self.seg = np.flatnonzero((self.owner[:-1] == self.owner[1:])
                                   & (self.pos[1:] == self.pos[:-1] + 1))
 
+        # Chunks of `size` consecutive samples, each box also taking in the next
+        # chunk's first sample: a segment starting in a chunk then lies inside
+        # its box, including the one that crosses into the next chunk.
+        n = self.xs.size
+        size = max(1, -(-n // MAX_INDEX_CHUNKS))
+        n_chunks = -(-n // size)
+        pad = n_chunks * size - n
+
+        def _per_chunk(arr, pick, fill):
+            arr = np.concatenate([arr, np.full(pad, fill)]) if pad else arr
+            arr = arr.reshape(n_chunks, size)
+            # Column by column: min(axis=1) over this short inner axis took
+            # about six times as long, most of the index build at 500 runs.
+            out = arr[:, 0].copy()
+            for j in range(1, size):
+                pick(out, arr[:, j], out=out)
+            return out
+
+        box = [_per_chunk(self.xs, np.minimum, np.inf),
+               _per_chunk(self.xs, np.maximum, -np.inf),
+               _per_chunk(self.ys, np.minimum, np.inf),
+               _per_chunk(self.ys, np.maximum, -np.inf)]
+        first_of_next = np.arange(1, n_chunks) * size
+        for k, (vals, pick) in enumerate(((self.xs, np.minimum), (self.xs, np.maximum),
+                                          (self.ys, np.minimum), (self.ys, np.maximum))):
+            box[k][:-1] = pick(box[k][:-1], vals[first_of_next])
+        self._box = np.vstack(box)
+        # Positions in `seg` where each chunk's segment starts begin and end.
+        self._seg_at = np.searchsorted(self.seg, np.arange(n_chunks + 1) * size)
+
     def __len__(self) -> int:
         return len(self.keys)
 
@@ -241,25 +278,41 @@ class _CurveIndex:
         """True once an axis scale changed — the cached coordinates baked it in."""
         return self.scales != (self.ax.get_xscale(), self.ax.get_yscale())
 
-    def _pixels(self):
-        """Scale-space samples in display coordinates, cached per view."""
-        matrix = (self.ax.transLimits + self.ax.transAxes).get_matrix()
-        key = matrix.tobytes()
-        if key != self._matrix:
-            m = matrix
-            self._px = m[0, 0] * self.xs + m[0, 1] * self.ys + m[0, 2]
-            self._py = m[1, 0] * self.xs + m[1, 1] * self.ys + m[1, 2]
-            self._matrix = key
-        return self._px, self._py
+    def _near_segments(self, m, x_px, y_px, radius_px):
+        """Segment starts in the chunks whose pixel box is within reach."""
+        x0, x1, y0, y1 = self._box
+
+        def _span(cx, cy, c):
+            # Pixel extent of the boxes under row (cx, cy, c) of the affine.
+            p, q, r, s = cx * x0, cx * x1, cy * y0, cy * y1
+            return (np.minimum(p, q) + np.minimum(r, s) + c,
+                    np.maximum(p, q) + np.maximum(r, s) + c)
+
+        px_lo, px_hi = _span(m[0, 0], m[0, 1], m[0, 2])
+        py_lo, py_hi = _span(m[1, 0], m[1, 1], m[1, 2])
+        near = np.flatnonzero((px_lo - radius_px <= x_px) & (x_px <= px_hi + radius_px)
+                              & (py_lo - radius_px <= y_px) & (y_px <= py_hi + radius_px))
+        starts, ends = self._seg_at[near], self._seg_at[near + 1]
+        lengths = ends - starts
+        total = int(lengths.sum())
+        if total == 0:
+            return np.empty(0, dtype=np.int64)
+        # Concatenate the ranges [start, end) without a Python loop.
+        shift = np.repeat(starts - np.cumsum(lengths) + lengths, lengths)
+        return self.seg[shift + np.arange(total)]
 
     def hit(self, x_px, y_px, radius_px=HIT_RADIUS_PX):
         """``(line, key, x_value, y_value, sample)`` for the nearest curve, else None."""
         if self.seg.size == 0:
             return None
-        px, py = self._pixels()
-        i = self.seg
-        ax_, ay = px[i], py[i]
-        bx, by = px[i + 1], py[i + 1]
+        m = (self.ax.transLimits + self.ax.transAxes).get_matrix()
+        i = self._near_segments(m, x_px, y_px, radius_px)
+        if i.size == 0:
+            return None
+        ax_ = m[0, 0] * self.xs[i] + m[0, 1] * self.ys[i] + m[0, 2]
+        ay = m[1, 0] * self.xs[i] + m[1, 1] * self.ys[i] + m[1, 2]
+        bx = m[0, 0] * self.xs[i + 1] + m[0, 1] * self.ys[i + 1] + m[0, 2]
+        by = m[1, 0] * self.xs[i + 1] + m[1, 1] * self.ys[i + 1] + m[1, 2]
         dx, dy = bx - ax_, by - ay
         length2 = dx * dx + dy * dy
         t = np.where(
@@ -277,10 +330,10 @@ class _CurveIndex:
             return None
         # Report an actual sample from the CSV, not a point interpolated along
         # the segment: whichever end of the winning segment is nearer.
-        lo = i[best]
-        d_lo = (px[lo] - x_px) ** 2 + (py[lo] - y_px) ** 2
-        d_hi = (px[lo + 1] - x_px) ** 2 + (py[lo + 1] - y_px) ** 2
-        j = int(lo if d_lo <= d_hi else lo + 1)
+        lo = int(i[best])
+        d_lo = (ax_[best] - x_px) ** 2 + (ay[best] - y_px) ** 2
+        d_hi = (bx[best] - x_px) ** 2 + (by[best] - y_px) ** 2
+        j = lo if d_lo <= d_hi else lo + 1
         owner = int(self.owner[j])
         return self.lines[owner], self.keys[owner], self.raw_x[j], self.raw_y[j], j
 
@@ -397,14 +450,22 @@ class CurveHoverManager:
     def _on_leave(self, _event) -> None:
         self.hide()
 
-    def _on_draw(self, _event) -> None:
+    def _on_draw(self, event) -> None:
         """Save the freshly drawn figure as the blit background.
 
         The bubble is animated, so a normal draw skips it and the background is
         clean. That same draw wiped whatever was blitted, so the tooltip's own
         state is reset here too. While blitting is unavailable the artists are
         the only state there is, so this leaves them alone.
+
+        Exports draw too: a PNG export renders on this canvas at export
+        resolution, an SVG one on a temporary canvas, and both emit this event.
+        Saving either as the background left a frame of the wrong size to be
+        restored by the next hover, so they are ignored.
         """
+        source = getattr(event, "canvas", self._canvas)
+        if source is not self._canvas or getattr(source, "is_saving", bool)():
+            return
         if not self._can_blit:
             self._bg = None
             return

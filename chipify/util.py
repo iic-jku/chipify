@@ -24,6 +24,10 @@ class Stimuli:
     """Parses a ``datasheet.yaml`` file into a test plan."""
 
     def __init__(self, yaml_file: str | os.PathLike[str] | None = None) -> None:
+        # The datasheet this plan was parsed from ("" when built in code). It
+        # travels with results loaded from it, so a report names the datasheet
+        # of the run on screen rather than whichever one is selected now.
+        self.yaml_path: str = str(yaml_file) if yaml_file else ""
         self.params: dict[str, Any] = {}
         self.tests: list[Test] = []
         # One-line ``description:`` — report cover and batch summary page.

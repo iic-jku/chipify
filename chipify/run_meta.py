@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import datetime
@@ -51,15 +52,27 @@ _SCHEMA_VERSION = 1
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+_RE_NGSPICE_VERSION = re.compile(r"\bngspice-([\w.+]+)")
+
+
 def _ngspice_version() -> str:
+    """``ngspice-<n>`` from ``ngspice --version``.
+
+    The banner opens with a row of asterisks, which is what the sidecar used
+    to record as the version.
+    """
     try:
         result = subprocess.run(
             ["ngspice", "--version"], capture_output=True, text=True, timeout=5
         )
-        first = (result.stdout or result.stderr or "").splitlines()[0]
-        return first.strip()
     except Exception:
         return ""
+    text = result.stdout or result.stderr or ""
+    m = _RE_NGSPICE_VERSION.search(text)
+    if m:
+        return f"ngspice-{m.group(1)}"
+    lines = [ln.strip("* \t") for ln in text.splitlines() if ln.strip("* \t")]
+    return lines[0] if lines else ""
 
 
 def _vacask_version() -> str:

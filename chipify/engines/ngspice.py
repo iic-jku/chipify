@@ -18,10 +18,20 @@ from pathlib import Path
 
 from chipify import settings
 from chipify.engines.abort import is_aborted
-from chipify.engines.base import BaseSimulator
+from chipify.engines.base import BaseSimulator, describe_exit_code, extract_error_line
 from chipify.engines.xschem import run_xschem, safe_tb_file, safe_tb_path
 
 log = logging.getLogger("chipify.engines.ngspice")
+
+# A command counts only as a whole line, never as text inside a comment: a
+# comment such as "* this .control block is for chipify" used to anchor the
+# injection, which then landed in the comment's position. The optional
+# "* {{ NL }}" prefix is the testbench idiom that keeps a line inert when xschem
+# simulates the bench by hand, while the chipify render turns it into a command.
+_LINE_START = r"(?im)^[ \t]*(?:\*[ \t]*\{\{[^}\n]*\}\}[ \t]*)?"
+_RE_CONTROL = re.compile(_LINE_START + r"\.control\b.*$")
+_RE_ENDC = re.compile(_LINE_START + r"\.endc\b.*$")
+_RE_QUIT = re.compile(_LINE_START + r"(?:quit|exit)\b.*$")
 
 
 def _inject_capture(netlist: str, injection: str) -> str:
@@ -32,17 +42,15 @@ def _inject_capture(netlist: str, injection: str) -> str:
     ``.control`` with ``quit`` (or ``exit``), which exits ngspice immediately — so
     inserting before ``.endc`` would place the capture *after* the quit, where it
     never runs (the silent Bode/AC "no data" bug). Insert before the first
-    ``quit``/``exit`` inside the control block if present, else before ``.endc``.
+    ``quit``/``exit`` inside the first control block if present, else before
+    its ``.endc``.
     """
-    ctrl_idx = netlist.find(".control")
-    endc_idx = netlist.find(".endc")
-    region = netlist[ctrl_idx:endc_idx] if (ctrl_idx != -1 and endc_idx != -1) else ""
-    m = re.search(r"(?im)^[ \t]*(?:quit|exit)\b.*$", region)
-    if m:
-        pos = ctrl_idx + m.start()
+    ctrl = _RE_CONTROL.search(netlist)
+    endc = _RE_ENDC.search(netlist, ctrl.end()) if ctrl else None
+    if ctrl and endc:
+        quit_line = _RE_QUIT.search(netlist, ctrl.end(), endc.start())
+        pos = quit_line.start() if quit_line else endc.start()
         return netlist[:pos] + injection + "\n" + netlist[pos:]
-    if endc_idx != -1:
-        return netlist.replace(".endc", f"{injection}\n.endc", 1)
     return netlist + "\n" + injection + "\n"
 
 
@@ -81,8 +89,9 @@ class NgspiceSimulator(BaseSimulator):
         datasheet measurements; chipify owns the ``set num_threads``, the
         ``MY_DATA:`` echo, and the per-analysis wrdata/setplot lines.
         """
-        if ".control" in netlist:
-            netlist = netlist.replace(".control", ".control\nset num_threads=1\n")
+        if _RE_CONTROL.search(netlist):
+            netlist = _RE_CONTROL.sub(
+                lambda m: m.group(0) + "\nset num_threads=1\n", netlist)
         else:
             netlist += "\n.control\nset num_threads=1\n.endc\n"
 
@@ -167,12 +176,16 @@ class NgspiceSimulator(BaseSimulator):
 
             return output_line, None
 
-        except subprocess.CalledProcessError:
-            err_msg = "CRASH"
+        except subprocess.CalledProcessError as exc:
+            # The log's first error line (a missing library, say) rather than
+            # its last lines, and how ngspice ended: an out-of-memory kill used
+            # to read as nothing but its trailing progress output.
+            detail = ""
             if temp_log_file.exists():
-                with open(temp_log_file, "r") as f:
-                    err_msg = "".join(f.readlines()[-5:]).strip()
-            return None, f"CRASH: {err_msg}"
+                detail = extract_error_line(
+                    temp_log_file.read_text(encoding="utf-8", errors="replace"))
+            how = describe_exit_code(exc.returncode)
+            return None, f"CRASH: ngspice {how}" + (f": {detail}" if detail else "")
         finally:
             if process is not None:
                 if process.poll() is None:

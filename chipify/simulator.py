@@ -23,8 +23,9 @@ import itertools
 import time
 import logging
 import datetime
+import shutil
 from pathlib import Path
-from multiprocessing import get_context
+from multiprocessing import active_children, current_process, get_context
 
 import pandas as pd
 from tqdm import tqdm
@@ -54,6 +55,8 @@ from chipify.engines.abort import (  # noqa: F401
 )
 from chipify.engines.base import (  # noqa: F401
     BaseSimulator,
+    describe_exit_code,
+    extract_error_line,
     extract_error_line as _extract_ngspice_error,
 )
 from chipify.engines.ngspice import NgspiceSimulator, _inject_capture  # noqa: F401
@@ -125,19 +128,22 @@ def _resolve_sim_timeout(cfg: dict) -> float:
 # ── Analysis persistence (worker side) ────────────────────────────────────────
 
 def _persist_analyses(analyses, analysis_tab_paths, analysis_dirs,
-                      run_id, tb_safe, tb_path, sample, engine=None):
+                      run_id, tb_safe, tb_path, sample, engine=None) -> list[str]:
     """Write each declared analysis's tab file into its per-run CSV.
 
     If an analysis was set up to capture (tab path + output dir both present) but
     produced no CSV — the tab is missing, or present-but-empty/unreadable so
-    ``persist_to_csv`` writes nothing — record a one-line reason (including the
-    engine's own error line) on *sample* under ``<tb>__<kind>_capture``. Worker
-    logging does not reach chipify.log (forkserver workers lack the file
-    handler), so the result row is the reliable channel; ``run_sim`` surfaces
-    these from the main process. This is what makes the silent Bode/AC
-    "no data" case diagnosable.
+    ``persist_to_csv`` writes nothing — record a one-line reason (the engine's
+    own ``capture_error``, else its log's error line) on *sample* under
+    ``<tb>__<kind>_capture``. Worker logging does not reach chipify.log
+    (forkserver workers lack the file handler), so the result row is the
+    reliable channel; ``run_sim`` surfaces these from the main process. This is
+    what makes the silent Bode/AC "no data" case diagnosable.
+
+    Returns the failure notes, so the caller can fail the testbench's row.
     """
     eng_name = getattr(engine, "name", "") or "simulator"
+    failures: list[str] = []
     for an in analyses:
         tab = analysis_tab_paths.get(an.kind, "")
         dest_dir = analysis_dirs.get(an.kind, "")
@@ -145,8 +151,11 @@ def _persist_analyses(analyses, analysis_tab_paths, analysis_dirs,
             continue
 
         reason = ""
+        engine_reason = ""
         if not Path(tab).exists():
-            reason = (
+            if engine is not None:
+                engine_reason = engine.capture_error(an.kind)
+            reason = engine_reason or (
                 f"{eng_name} wrote no {an.kind} tab to capture "
                 f"(does the testbench run its .{an.kind} analysis?)"
             )
@@ -161,13 +170,15 @@ def _persist_analyses(analyses, analysis_tab_paths, analysis_dirs,
 
         if reason:
             err = ""
-            if engine is not None:
+            if engine is not None and not engine_reason:
                 err = engine.extract_error(engine.run_log_tail())
             note = f"{an.kind} produced no data - {reason}"
             if err:
                 note += f" | {eng_name}: {err}"
             sample[f"{tb_path}__{an.kind}_capture"] = note
             log.warning("%s: %s", tb_path, note)  # also surfaced from run_sim (main)
+            failures.append(note)
+    return failures
 
 
 def _log_capture_failures(results: list) -> None:
@@ -223,6 +234,27 @@ def _eval_scalar_measures(test, sample: dict, params: dict) -> None:
             sample[name] = float('nan')
             note = f"measure '{name}' = {expr!r} failed: {exc}"
             sample[f"{test.tb_path}__measure_error"] = " ".join(str(note).split())[:200]
+
+
+#: How much of a run's log to search for the line explaining missing values: a
+#: fatal model or library error sits near the top, before any analysis output.
+_HINT_LOG_LINES = 100_000
+
+
+def _log_hint(engine) -> str:
+    """``" | <engine>: <first error line of its last run>"``, or '' if none.
+
+    Values missing because the simulation itself failed (a shell without the
+    PDK setup, a vector the testbench never defined) used to read as a bare
+    ``INVALID_OUTPUT(... got 0)`` or ``NO_MY_DATA_FOUND``, with the reason
+    left in a log that worker processes never forward.
+    """
+    try:
+        line = extract_error_line(engine.run_log_tail(_HINT_LOG_LINES),
+                                  fallback=False)
+    except Exception:  # noqa: BLE001 — a diagnostic must never fail the row
+        return ""
+    return f" | {engine.name}: {line}" if line else ""
 
 
 def _record_error(sample: dict, test, message: str) -> None:
@@ -344,14 +376,21 @@ def _simulate_single_case(params, tests, engine_for,
 
         # Persist every analysis's tab file into its destination CSV (and surface
         # any analysis that ran but produced no output — see _persist_analyses).
-        _persist_analyses(
+        capture_failures = _persist_analyses(
             analyses, analysis_tab_paths, analysis_dirs,
             run_id, tb_safe, test.tb_path, sample, engine=engine,
         )
+        # A declared waveform that was not captured is a failed output of this
+        # testbench, like a missing scalar. As a diagnostic note only, it left
+        # sim_error 'None' and global_pass True: a sweep lost its transfer
+        # curves in 44 of 45 runs without a single error in the results.
+        for note in capture_failures:
+            _record_error(sample, test, f"{test.tb_path}: CAPTURE_ERROR: {note}")
+        capture_ok = not capture_failures
 
         # Transient-only testbench: no scalar measurements defined → skip MY_DATA.
         if not test.value_lst:
-            sample[f"{test.tb_path}_overall_pass"] = True
+            sample[f"{test.tb_path}_overall_pass"] = capture_ok
             _eval_scalar_measures(test, sample, params)
             continue
 
@@ -359,7 +398,7 @@ def _simulate_single_case(params, tests, engine_for,
             clean_line = sim_output[len("MY_DATA:"):].strip()
             values = [v for v in clean_line.split(' ') if v]
 
-            all_passed = True
+            all_passed = capture_ok
             for i, val_str in enumerate(values):
                 if i >= len(test.value_lst):
                     break
@@ -389,7 +428,8 @@ def _simulate_single_case(params, tests, engine_for,
                 _record_error(
                     sample, test,
                     f"{test.tb_path}: INVALID_OUTPUT("
-                    f"expected {n_expected} values, got {len(values)})",
+                    f"expected {n_expected} values, got {len(values)})"
+                    f"{_log_hint(engine)}",
                 )
                 all_passed = False
                 for val_obj in test.value_lst[len(values):]:
@@ -399,7 +439,8 @@ def _simulate_single_case(params, tests, engine_for,
             sample[f"{test.tb_path}_overall_pass"] = all_passed
             _eval_scalar_measures(test, sample, params)
         else:
-            _record_error(sample, test, f"{test.tb_path}: NO_MY_DATA_FOUND")
+            _record_error(sample, test,
+                          f"{test.tb_path}: NO_MY_DATA_FOUND{_log_hint(engine)}")
             sample[f"{test.tb_path}_overall_pass"] = False
 
     return sample
@@ -439,6 +480,86 @@ def _simulate_single_case_with_engine(params, tests, engine: BaseSimulator,
     )
 
 
+class _LostBatchDetector:
+    """Find submitted batches whose worker process died before returning them.
+
+    ``multiprocessing.Pool`` replaces a worker that dies abruptly (OOM kill,
+    segfault, ``os._exit``) but never resolves the task it was running: that
+    AsyncResult stays unready forever, ``get()`` never raises, and the sweep
+    waits for a case nobody is simulating. So every worker writes its process
+    name into a claim file when it takes a batch (``_claim_batch``), and when
+    the set of pool processes changes, unready batches whose claimant is gone
+    are reported lost. Names, not pids: Windows reuses pids quickly.
+
+    A worker that dies between taking a batch and writing its claim (while
+    unpickling the task) is not detected.
+    """
+
+    #: How long a batch whose worker is gone may still deliver its result. A
+    #: worker that sent its result and then died is not a lost batch.
+    GRACE_SEC = 2.0
+
+    def __init__(self, claim_dir: Path) -> None:
+        self.claim_dir = claim_dir
+        claim_dir.mkdir(parents=True, exist_ok=True)
+        self._live = self._live_workers()
+        self._seen = dict(self._live)
+        self._suspects: dict[int, tuple[float, str]] = {}
+
+    @staticmethod
+    def _live_workers() -> dict:
+        return {p.name: p for p in active_children()}
+
+    def claim_path(self, index: int) -> str:
+        return str(self.claim_dir / f"batch_{index}")
+
+    def _claimant(self, index: int) -> str:
+        try:
+            return Path(self.claim_path(index)).read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _describe(self, name: str) -> str:
+        proc = self._seen.get(name)
+        if proc is None:
+            return f"worker process {name} exited"
+        return (f"worker process {name} (pid {proc.pid}) "
+                f"{describe_exit_code(proc.exitcode)}")
+
+    def poll(self, pending: list[int]) -> dict[int, str]:
+        """Map each pending batch index whose worker is gone to the reason."""
+        live = self._live_workers()
+        now = time.monotonic()
+        # Claims are only read when a pool process came or went: a replacement
+        # appearing means a death even if the dead worker was never seen alive.
+        if live.keys() != self._live.keys():
+            self._seen.update(live)
+            for index in pending:
+                name = "" if index in self._suspects else self._claimant(index)
+                if name and name not in live:
+                    self._suspects[index] = (now, self._describe(name))
+            self._live = live
+        lost: dict[int, str] = {}
+        for index in pending:
+            since, reason = self._suspects.get(index, (None, ""))
+            if since is not None and now - since >= self.GRACE_SEC:
+                lost[index] = reason
+        return lost
+
+    def close(self) -> None:
+        shutil.rmtree(self.claim_dir, ignore_errors=True)
+
+
+def _claim_batch(claim_path: str) -> None:
+    """Record which pool worker took a batch (see _LostBatchDetector)."""
+    if not claim_path:
+        return
+    try:
+        Path(claim_path).write_text(current_process().name, encoding="utf-8")
+    except OSError:
+        pass  # only loss detection is off for this batch; the batch still runs
+
+
 def simulate_case_batch(batch_args):
     """Worker helper: process a batch of cases to reduce IPC overhead.
 
@@ -446,13 +567,19 @@ def simulate_case_batch(batch_args):
     are instantiated once per worker and reused across the batch, so a datasheet
     can mix engines across testbenches.
     """
-    param_id_batch, tests, analysis_dirs = batch_args
+    param_id_batch, tests, analysis_dirs, claim_path = batch_args
+    _claim_batch(claim_path)
     engine_for = engine_selector()
 
-    return [
-        _simulate_single_case(params, tests, engine_for, run_id, analysis_dirs)
-        for params, run_id in param_id_batch
-    ]
+    results = []
+    for params, run_id in param_id_batch:
+        # Aborted, or the chipify process that queued this batch has died:
+        # start no further simulator (see abort.parent_gone).
+        if _is_aborted():
+            break
+        results.append(
+            _simulate_single_case(params, tests, engine_for, run_id, analysis_dirs))
+    return results
 
 
 def _chunk_args(worker_args, chunk_size):
@@ -594,6 +721,47 @@ def _create_analysis_dirs(stim, out_dir) -> dict[str, str]:
     return analysis_dirs
 
 
+def _check_executable_plan(stim) -> None:
+    """Refuse a plan that would simulate without checking anything.
+
+    With no testbench, every parameter case came back with no error and no
+    verdict column, which ``global_pass`` reads as passed: 100 % yield for a
+    run that measured nothing. A testbench that declares no measurement, no
+    ``measure:`` and no signals passes vacuously the same way. The datasheet
+    schema allows both, since a datasheet is built up step by step in the GUI.
+    """
+    if not stim.tests:
+        raise ValueError(
+            "The datasheet declares no testbenches under 'tests:', "
+            "so there is nothing to simulate."
+        )
+    idle = [t.tb_path for t in stim.tests
+            if not (t.value_lst or getattr(t, "measure", None)
+                    or getattr(t, "analyses", None))]
+    if idle:
+        raise ValueError(
+            f"Testbench(es) {', '.join(idle)} declare no measurements or "
+            f"signals, so their runs could only pass without checking anything."
+        )
+
+
+def _check_any_netlist(stim) -> None:
+    """Refuse to dispatch when not a single testbench could be netlisted.
+
+    A testbench whose netlist failed fails only its own rows, so the others
+    still run. With none left, every case is a foregone failure: a datasheet
+    whose testbenches had all been moved ran 9000 cases into 9000 crashes.
+    """
+    errors = [t.template_error or f"{t.tb_path}: no netlist template"
+              for t in stim.tests
+              if getattr(t, "template_error", None) or not getattr(t, "template_str", "")]
+    if stim.tests and len(errors) == len(stim.tests):
+        raise RuntimeError(
+            "No testbench could be netlisted, so every case would fail: "
+            + "; ".join(errors)
+        )
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
@@ -627,10 +795,12 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         callers must report it rather than mistake it for a cancellation.
     """
     pool = None
+    detector = None
     log.info("run_sim() started. Testbenches: %d", len(stim.tests))
 
     try:
         clear_abort_flag()
+        _check_executable_plan(stim)
 
         # ── Init phase ────────────────────────────────────────────────────────
         log.info("Phase 1/3: generating parameter cases...")
@@ -651,6 +821,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
             raise InterruptedError("Aborted before template generation.")
         log.info("Phase 2/3: generating Xschem templates...")
         generate_templates(stim, templates_dir=templates_dir)
+        _check_any_netlist(stim)
 
         if _is_aborted():
             raise InterruptedError("Aborted before RAM staging.")
@@ -685,6 +856,9 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         ctx = get_context(start_method)
         pool = ctx.Pool(processes=num_cores)
         log.debug("Pool created (%s, %d workers).", start_method, num_cores)
+        detector = _LostBatchDetector(
+            Path(settings.FAST_TMP) / f"claims_{os.getpid()}_{time.time_ns()}"
+        )
 
         # Batch tasks to reduce scheduler/IPC overhead while keeping polling.
         # Each batch item is a (params, run_id) pair so workers can persist
@@ -698,12 +872,15 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
             (
                 pool.apply_async(
                     simulate_case_batch,
-                    ((batch, stim.tests, analysis_dirs),),
+                    ((batch, stim.tests, analysis_dirs,
+                      detector.claim_path(index)),),
                 ),
                 batch,
+                index,
             )
-            for batch in param_id_batches
+            for index, batch in enumerate(param_id_batches)
         ]
+        tasks_lost = False
         log.debug("%d batch tasks submitted (chunk_size=%d).", len(pending), chunk_size)
 
         chunk_emit_stride = max(1, app_config.get_live_plot_emit_stride()) if chunk_callback else 1
@@ -716,22 +893,33 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
                     log.info("Abort flag detected – terminating pool.")
                     raise InterruptedError("Abort flag detected during run.")
 
+                lost = detector.poll([index for _ar, _batch, index in pending])
                 still_pending = []
-                for ar, batch in pending:
-                    if not ar.ready():
-                        still_pending.append((ar, batch))
-                        continue
-
-                    try:
-                        batch_results = ar.get(timeout=0)
-                    except InterruptedError:
-                        raise
-                    except Exception as exc:  # incl. WorkerLostError
+                for ar, batch, index in pending:
+                    if ar.ready():
+                        try:
+                            batch_results = ar.get(timeout=0)
+                        except InterruptedError:
+                            raise
+                        except Exception as exc:  # incl. WorkerLostError
+                            log.error(
+                                "Worker error (%d case(s) recorded as errors): %s",
+                                len(batch), exc,
+                            )
+                            batch_results = _lost_batch_rows(batch, stim.tests, exc)
+                    elif index in lost:
+                        # Its worker died with it, so this result never arrives
+                        # (see _LostBatchDetector).
                         log.error(
-                            "Worker error (%d case(s) recorded as errors): %s",
-                            len(batch), exc,
+                            "Worker lost (%d case(s) recorded as errors): %s",
+                            len(batch), lost[index],
                         )
-                        batch_results = _lost_batch_rows(batch, stim.tests, exc)
+                        batch_results = _lost_batch_rows(batch, stim.tests,
+                                                         lost[index])
+                        tasks_lost = True
+                    else:
+                        still_pending.append((ar, batch, index))
+                        continue
 
                     results.extend(batch_results)
                     completed += len(batch_results)
@@ -770,7 +958,13 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
                 log.debug("chunk_callback failed on final flush.", exc_info=True)
             chunk_row_buffer = []
 
-        pool.close()
+        if tasks_lost:
+            # A lost task stays in the pool's cache, and a closed pool waits
+            # for that cache to drain: join() would never return. Every worker
+            # left is idle by now.
+            pool.terminate()
+        else:
+            pool.close()
         pool.join()
         log.info("Pool finished cleanly. %d results collected.", len(results))
 
@@ -803,5 +997,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         raise
 
     finally:
+        if detector is not None:
+            detector.close()
         clear_abort_flag()
         log.info("run_sim() exited.")

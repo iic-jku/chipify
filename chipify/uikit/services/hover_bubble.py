@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 
+from matplotlib.text import Text
+
 log = logging.getLogger("chipify.uikit.hover_bubble")
 
 ACCENT = "#3484F0"
@@ -39,6 +41,29 @@ def fmt_value(v) -> str:
         return f"{float(v):.4g}"
     except Exception:
         return str(v)
+
+
+def _physical_size(canvas) -> tuple[float, float]:
+    """Canvas size in physical pixels, the unit of events and window extents."""
+    try:
+        return canvas.get_width_height(physical=True)
+    except TypeError:  # matplotlib < 3.6: no HiDPI scaling to undo
+        return canvas.get_width_height()
+
+
+def _edge(pos: float, size: float, gap: float, limit: float) -> float:
+    """Lower edge, along one axis, of a bubble of *size* beside *pos*.
+
+    After the point when it fits there, else before it, else clamped into
+    ``[0, limit]`` on the side with more room.
+    """
+    after, before = pos + gap, pos - gap - size
+    if after + size <= limit:
+        return after
+    if before >= 0:
+        return before
+    preferred = after if limit - pos >= pos else before
+    return min(max(preferred, 0.0), max(limit - size, 0.0))
 
 
 class HoverBubble:
@@ -124,16 +149,36 @@ class HoverBubble:
         return annot
 
     def _place(self, annot, event) -> None:
-        """Flip the bubble's offsets so it stays inside the canvas."""
+        """Put the bubble beside the point, on a side where it fits the canvas.
+
+        Everything is measured in physical pixels, like the event: the logical
+        ``get_width_height()`` made tall bubbles flip off the canvas at a device
+        pixel ratio of 1.5 to 2. A bubble too tall for the room above used to
+        flip below without checking the room there either; now it takes the
+        side that fits, or is clamped inside the canvas when neither does.
+        """
         try:
             renderer = self._canvas.get_renderer()
-            w, h = self._canvas.get_width_height()
+            w, h = _physical_size(self._canvas)
             annot.set_position((OFFSET, OFFSET))
             annot.set_ha("left")
             annot.set_va("bottom")
-            bbox = annot.get_window_extent(renderer)
-            x_off = -OFFSET if event.x + OFFSET + bbox.width > w else OFFSET
-            y_off = -OFFSET if event.y + OFFSET + bbox.height > h else OFFSET
+            # Text and rounded box are laid out only by a draw. Refresh the
+            # text's offset transform for the new anchor, size the box (it
+            # still sits at the origin) and centre it on the text.
+            annot.update_positions(renderer)
+            annot.update_bbox_position_size(renderer)
+            patch = annot.get_bbox_patch().get_window_extent(renderer)
+            text = Text.get_window_extent(annot, renderer)   # without the arrow
+            x0 = text.x0 - (patch.width - text.width) / 2.0
+            y0 = text.y0 - (patch.height - text.height) / 2.0
+            to_px = self._fig.dpi / 72.0           # offsets are in points
+            gap = OFFSET * to_px
+            left = _edge(event.x, patch.width, gap, w)
+            bottom = _edge(event.y, patch.height, gap, h)
+            annot.set_position((OFFSET + (left - x0) / to_px,
+                                OFFSET + (bottom - y0) / to_px))
+            return
         except Exception:
             # Renderer not ready — mirror near the top/right axes edges instead.
             try:

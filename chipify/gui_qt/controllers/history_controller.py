@@ -40,7 +40,8 @@ class HistoryController(QObject):
         if yaml_path:
             yaml_name = Path(yaml_path).name
 
-        runs = _dl.list_history_runs(settings.OUT_DIR, yaml_name=yaml_name)
+        runs = _dl.list_history_runs(settings.OUT_DIR, yaml_name=yaml_name,
+                                     include_batch=True)
 
         combo.blockSignals(True)
         combo.clear()
@@ -64,8 +65,9 @@ class HistoryController(QObject):
         if csv_path is None:
             return
         try:
-            df = _dl.load_csv(csv_path)
             stim = util.Stimuli(self.window.current_yaml_path)
+            # Views show the datasheet's current limits: grade against them.
+            df = _dl.regrade(_dl.load_csv(csv_path), stim)
         except Exception as exc:  # noqa: BLE001
             log.warning("Could not load run %s: %s", label, exc)
             self.window.set_status(f"Could not load {label}", "#e74c3c")

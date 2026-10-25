@@ -315,6 +315,184 @@ def test_unparsable_my_data_token_records_nan() -> None:
     assert sample["tb_x_overall_pass"] is False
 
 
+# ── Analysis-capture failures are testbench errors ───────────────────────────
+
+class _TabEngine(_FakeEngine):
+    """Engine stub that also writes the requested transient tab."""
+
+    def run(self, netlist, timeout_sec=10, test=None, analysis_tab_paths=None):
+        with open(analysis_tab_paths["transient"], "w", encoding="utf-8") as fh:
+            fh.write("0.0 1.0\n1.0 2.0\n")
+        return self._output, None
+
+
+def _case_with_transient(monkeypatch, tmp_path, test, engine):
+    from chipify import settings
+    from chipify.analyses import TransientAnalysis
+    monkeypatch.setattr(settings, "FAST_TMP", str(tmp_path))
+    test.analyses = [TransientAnalysis(["v(out)"])]
+    return simulator._simulate_single_case(
+        {}, [test], lambda _t: engine, run_id="000000",
+        analysis_dirs={"transient": str(tmp_path / "tran")},
+    )
+
+
+def test_capture_failure_fails_the_testbench_row(monkeypatch, tmp_path) -> None:
+    """A declared waveform that never arrived used to be a diagnostic note only:
+    sim_error stayed 'None' and the row passed with its curve missing."""
+    from chipify import data_loader as dl
+    import pandas as pd
+    test = _make_test("tb_x", ["gain"])
+    sample = _case_with_transient(monkeypatch, tmp_path, test,
+                                  _FakeEngine("MY_DATA: 60.0"))
+
+    assert "CAPTURE_ERROR" in sample["tb_x__error"]
+    assert "transient produced no data" in sample["sim_error"]
+    assert sample["tb_x_overall_pass"] is False
+    assert sample["gain"] == pytest.approx(60.0)   # the value itself is kept
+    df = dl.prepare_results(pd.DataFrame([sample]))
+    assert not df["global_pass"].iloc[0]
+    assert dl.result_summary(df).crashes == 1
+
+
+def test_capture_failure_fails_a_waveform_only_testbench(monkeypatch, tmp_path) -> None:
+    test = _make_test("tb_w", [])
+    sample = _case_with_transient(monkeypatch, tmp_path, test, _FakeEngine(""))
+    assert "CAPTURE_ERROR" in sample["tb_w__error"]
+    assert sample["tb_w_overall_pass"] is False
+
+
+def test_captured_waveform_leaves_the_row_clean(monkeypatch, tmp_path) -> None:
+    test = _make_test("tb_x", ["gain"])
+    sample = _case_with_transient(monkeypatch, tmp_path, test,
+                                  _TabEngine("MY_DATA: 60.0"))
+    assert sample["sim_error"] == "None"
+    assert sample["tb_x_overall_pass"] is True
+    assert (tmp_path / "tran" / "run_000000__tb_x.csv").exists()
+
+
+# ── The simulator's own reason reaches the result row ────────────────────────
+
+class _LoggingEngine(_FakeEngine):
+    """Returns a canned MY_DATA line and a canned run log."""
+
+    def __init__(self, output_line: str, log_text: str) -> None:
+        super().__init__(output_line)
+        self._log = log_text
+
+    def run_log_tail(self, n_lines: int = 25) -> str:
+        return self._log
+
+
+_NO_PDK_LOG = (
+    "Note: No compatibility mode selected!\n"
+    "Error: &a_v: no such variable.\n"
+    "Circuit: tb\n"
+    "MY_DATA:\n"
+    "ngspice-47 done\n"
+)
+
+
+@pytest.mark.parametrize("output", ["MY_DATA:", ""])
+def test_missing_values_carry_the_simulator_error_line(output) -> None:
+    """A broken simulation (e.g. no PDK setup) read as a bare
+    INVALID_OUTPUT(... got 0) or NO_MY_DATA_FOUND."""
+    test = _make_test("tb_x", ["a_v"])
+    sample = simulator._simulate_single_case_with_engine(
+        {}, [test], _LoggingEngine(output, _NO_PDK_LOG))
+    assert "fake: Error: &a_v: no such variable." in sample["sim_error"]
+
+
+def test_no_hint_when_the_log_shows_no_error() -> None:
+    test = _make_test("tb_x", ["a", "b"])
+    sample = simulator._simulate_single_case_with_engine(
+        {}, [test], _LoggingEngine("MY_DATA: 1", "Circuit: tb\nngspice-47 done\n"))
+    assert sample["sim_error"] == "tb_x: INVALID_OUTPUT(expected 2 values, got 1)"
+
+
+def _fake_ngspice(log_text: str, returncode: int):
+    class _Process:
+        def __init__(self, cmd, stdout=None, **_kw) -> None:
+            stdout.write(log_text)
+            self.returncode = returncode
+            self.args = cmd
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    return _Process
+
+
+@pytest.mark.parametrize("log_text, code, expected", [
+    # A fatal error near the top used to be cut off by the last-5-lines tail.
+    ("Error: Could not find library file cornerMOSlv.lib\n"
+     + "".join(f"line {i}\n" for i in range(20)),
+     1, "CRASH: ngspice exited with code 1: Error: Could not find library file"),
+    # An OOM kill read as its last progress line only.
+    ("Reference value : 1.18547e-04\n", -9, "CRASH: ngspice was killed by"),
+])
+def test_ngspice_crash_names_the_cause(tmp_path, monkeypatch, log_text, code,
+                                       expected) -> None:
+    from chipify import settings
+    from chipify.engines import ngspice as ng_mod
+
+    monkeypatch.setattr(settings, "FAST_TMP", str(tmp_path))
+    monkeypatch.setattr(ng_mod.subprocess, "Popen", _fake_ngspice(log_text, code))
+    output, error = ng_mod.NgspiceSimulator().run("* deck\n")
+    assert output is None
+    assert error.startswith(expected)
+    assert "\n" not in error
+
+
+def test_describe_exit_code() -> None:
+    import signal
+    from chipify.engines.base import describe_exit_code
+    assert describe_exit_code(3) == "exited with code 3"
+    if hasattr(signal, "SIGKILL"):
+        assert describe_exit_code(-signal.SIGKILL) == (
+            "was killed by SIGKILL (out of memory?)")
+    assert describe_exit_code(None) == "exited"
+
+
+# ── Plans with nothing to execute ─────────────────────────────────────────────
+
+def test_run_sim_refuses_a_plan_without_testbenches() -> None:
+    """Every case used to come back error-free with no verdict: 100 % yield."""
+    from chipify.util import Stimuli
+    stim = Stimuli()
+    stim.params = {"temp": [27, 85]}
+    with pytest.raises(ValueError, match="no testbenches"):
+        simulator.run_sim(stim)
+
+
+def test_run_sim_refuses_when_no_testbench_could_be_netlisted(tmp_path, monkeypatch) -> None:
+    """Testbenches that had all been moved away: 9000 cases, 9000 crashes."""
+    from chipify.util import Stimuli
+
+    def _must_not_stage(*_a, **_k):
+        raise AssertionError("nothing may be dispatched")
+
+    monkeypatch.setattr(simulator, "stage_files_to_ram", _must_not_stage)
+    stim = Stimuli()
+    stim.params = {"temp": [27, 85]}
+    stim.tests = [_make_test("tb_a", ["gain"]), _make_test("tb_b", ["bw"])]
+    # An empty --templates-dir: neither testbench has a netlist.
+    with pytest.raises(RuntimeError, match="No testbench could be netlisted.*tb_a.*tb_b"):
+        simulator.run_sim(stim, templates_dir=str(tmp_path))
+
+
+def test_run_sim_refuses_a_testbench_that_checks_nothing() -> None:
+    from chipify.util import Stimuli
+    stim = Stimuli()
+    stim.params = {"temp": [27]}
+    stim.tests = [_make_test("tb_ok", ["gain"]), _make_test("tb_empty", [])]
+    with pytest.raises(ValueError, match="tb_empty"):
+        simulator.run_sim(stim)
+
+
 # ── sim_timeout_sec resolution ────────────────────────────────────────────────
 
 def test_resolve_sim_timeout() -> None:

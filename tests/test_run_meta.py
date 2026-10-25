@@ -36,6 +36,19 @@ def test_update_meta_creates_minimal_sidecar(tmp_path) -> None:
     assert "yaml" not in meta
 
 
+def test_ngspice_version_is_the_version_not_the_banner_border(monkeypatch) -> None:
+    """The first line of `ngspice --version` is a row of asterisks."""
+    import subprocess
+
+    banner = ("******\n"
+              "** ngspice-47 : Circuit level simulation program\n"
+              "** Compiled with KLU Direct Linear Solver\n")
+    monkeypatch.setattr(run_meta.subprocess, "run", lambda *a, **k:
+                        subprocess.CompletedProcess(a, 0, stdout=banner, stderr=""))
+    from tests.conftest import REAL_NGSPICE_VERSION   # conftest stubs the probe
+    assert REAL_NGSPICE_VERSION() == "ngspice-47"
+
+
 # ── Waveform directories: relative to the output root ─────────────────────────
 
 def _history_run(root, wave_kind="transient"):
@@ -95,6 +108,53 @@ def test_load_csv_restores_the_runs_own_waveform_dirs(tmp_path) -> None:
     df = data_loader.load_csv(str(hist))
     assert df.attrs["analysis_dirs"] == {"transient": str(wave)}
     assert transient_loader.resolve_analysis_dir(df, root, "transient") == str(wave)
+
+
+def _newer_run_with_pointer(root, kind="transient"):
+    newer = root / "analysis_data" / kind / "20260612_090000"
+    newer.mkdir(parents=True)
+    (root / "analysis_data" / kind / ".latest").write_text(str(newer), encoding="utf-8")
+    return newer
+
+
+def test_a_deleted_waveform_dir_is_not_replaced_by_a_newer_runs(tmp_path) -> None:
+    """The run's own directory is gone: report no data instead of quietly
+    showing the curves of the run behind the .latest pointer."""
+    import shutil
+    from chipify import data_loader
+    from chipify.uikit.services import transient_loader
+
+    root = tmp_path / "out"
+    hist, wave = _history_run(root)
+    run_meta.write_meta(hist, analysis_dirs={"transient": str(wave)})
+    _newer_run_with_pointer(root)
+    shutil.rmtree(wave)
+
+    df = data_loader.load_csv(str(hist))
+    assert transient_loader.resolve_analysis_dir(df, root, "transient") == ""
+
+
+def test_a_kind_the_run_never_captured_is_not_borrowed(tmp_path) -> None:
+    from chipify import data_loader
+    from chipify.uikit.services import transient_loader
+
+    root = tmp_path / "out"
+    hist, wave = _history_run(root)
+    run_meta.write_meta(hist, analysis_dirs={"transient": str(wave)})
+    _newer_run_with_pointer(root, kind="ac")
+
+    df = data_loader.load_csv(str(hist))
+    assert transient_loader.resolve_analysis_dir(df, root, "ac") == ""
+
+
+def test_a_run_without_recorded_dirs_still_uses_the_pointer(tmp_path) -> None:
+    """Legacy CSVs carry no waveform directories: the pointer is all there is."""
+    import pandas as pd
+    from chipify.uikit.services import transient_loader
+
+    newer = _newer_run_with_pointer(tmp_path)
+    assert transient_loader.resolve_analysis_dir(
+        pd.DataFrame(), tmp_path, "transient") == str(newer)
 
 
 def test_resolve_analysis_dir_takes_relative_meta_paths_from_out_dir(tmp_path) -> None:

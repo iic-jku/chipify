@@ -218,9 +218,35 @@ def _exporters() -> dict[str, Any]:
     return {e.extension.lstrip(".").lower(): e for e in get_exporter_plugins()}
 
 
+def _unique_stems(specs: list[PlotSpec], warnings: list[str]) -> list[str]:
+    """One output file stem per plot spec, never shared by two specs.
+
+    Default stems leave out options such as bins, fit or the run selection,
+    and explicit names can repeat or slug to the same text: two histograms of
+    one measurement were reported as two files while the second overwrote the
+    first. Compared case-insensitively, as on Windows and macOS file systems.
+    """
+    taken: set[str] = set()
+    stems: list[str] = []
+    for spec in specs:
+        stem = default_plot_name(spec)
+        if stem.casefold() in taken:
+            n = 2
+            while f"{stem}_{n}".casefold() in taken:
+                n += 1
+            warnings.append(
+                f"{stem}: another plot is already saved under this name, so "
+                f"this one is saved as {stem}_{n}. Give the plots distinct "
+                f"'name:' values."
+            )
+            stem = f"{stem}_{n}"
+        taken.add(stem.casefold())
+        stems.append(stem)
+    return stems
+
+
 def _write_plot(spec: PlotSpec, cfg: ReportsConfig, df, stim,
-                out_dir: Path, theme, result: ReportResult) -> None:
-    stem = default_plot_name(spec)
+                out_dir: Path, theme, result: ReportResult, stem: str) -> None:
     formats = spec.resolved_formats(cfg.formats)
     if not formats:
         result.warnings.append(f"{stem}: no output formats requested; skipped.")
@@ -260,10 +286,18 @@ def _write_plot(spec: PlotSpec, cfg: ReportsConfig, df, stim,
                 result.warnings.append(f"{stem}: no exporter for format {fmt!r}.")
                 continue
             dest = out_dir / f"{stem}.{fmt}"
+            # Exporters can be user plugins: one that raises costs only its own
+            # file. It used to escape generate_reports and take every later
+            # plot, the PDF and the Markdown report with it.
             try:
-                exporter().export(fig, str(dest), theme=theme)
-            except TypeError:      # exporter predating the theme kwarg
-                exporter().export(fig, str(dest))
+                try:
+                    exporter().export(fig, str(dest), theme=theme)
+                except TypeError:      # exporter predating the theme kwarg
+                    exporter().export(fig, str(dest))
+            except Exception as exc:  # noqa: BLE001
+                result.warnings.append(f"{stem}: {fmt} export failed ({exc})")
+                log.warning("Report plot %r: %s export failed: %s", stem, fmt, exc)
+                continue
             result.files.append(dest)
     finally:
         # Figures are created outside pyplot, so nothing closes them for us.
@@ -348,8 +382,9 @@ def generate_reports(df: pd.DataFrame, stim: Any, yaml_path: str,
     dest.mkdir(parents=True, exist_ok=True)
     prepared = _dl.prepare_results(df)
 
-    for spec in cfg.plots:
-        _write_plot(spec, cfg, prepared, stim, dest, theme, result)
+    stems = _unique_stems(cfg.plots, result.warnings)
+    for spec, stem in zip(cfg.plots, stems):
+        _write_plot(spec, cfg, prepared, stim, dest, theme, result, stem)
     _write_documents(cfg, prepared, stim, yaml_path, dest, duration_s, result)
 
     try:

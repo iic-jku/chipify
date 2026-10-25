@@ -188,6 +188,50 @@ def test_one_bad_spec_does_not_stop_the_others(tmp_path):
     assert any("not_a_measurement" in w for w in result.warnings)
 
 
+def test_plots_sharing_a_file_name_are_both_written(tmp_path):
+    """Two histograms of one measurement (different bins) reported two files
+    but the second silently overwrote the first."""
+    stim = _stim()
+    stim.reports = ReportsConfig(
+        formats=["png"],
+        plots=[
+            PlotSpec("histogram", options={"param": "gain", "bins": 10}),
+            PlotSpec("histogram", options={"param": "gain", "bins": 40}),
+            PlotSpec("scatter", name="Gain", options={"x": "gain", "y": "pm"}),
+            PlotSpec("scatter", name="gain", options={"x": "pm", "y": "gain"}),
+        ],
+    )
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
+    names = [f.name for f in result.files]
+    assert names == ["histogram_gain.png", "histogram_gain_2.png",
+                     "Gain.png", "gain_2.png"]
+    assert all(f.exists() for f in result.files)
+    assert sum("distinct 'name:'" in w for w in result.warnings) == 2
+
+
+def test_a_failing_exporter_costs_only_its_own_file(tmp_path, monkeypatch):
+    """A plugin exporter that raised escaped generate_reports, so the later
+    plots and the PDF were never written."""
+    real = rs._exporters()
+
+    class _Broken:
+        extension = "svg"
+
+        def export(self, fig, path, theme=None):
+            raise RuntimeError("exporter bug")
+
+    monkeypatch.setattr(rs, "_exporters", lambda: {**real, "svg": _Broken})
+    stim = _stim()
+    stim.reports = ReportsConfig(
+        formats=["svg", "png"], pdf=True,
+        plots=[PlotSpec("histogram", options={"param": "gain"}),
+               PlotSpec("scatter", options={"x": "gain", "y": "pm"})],
+    )
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
+    assert sorted(f.suffix for f in result.files) == [".pdf", ".png", ".png"]
+    assert sum("svg export failed (exporter bug)" in w for w in result.warnings) == 2
+
+
 def test_missing_waveform_directory_warns_rather_than_raising(tmp_path):
     stim = _stim()
     stim.reports = ReportsConfig(

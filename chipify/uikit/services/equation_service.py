@@ -70,6 +70,12 @@ def apply_scalar_equations(
         ``df_out``        – updated DataFrame with new columns appended.
         ``derived_names`` – names of successfully added columns.
         ``log_lines``     – human-readable per-equation status lines.
+
+    An equation may only add a column: one named like a column *df* already
+    has (a measurement, an input, bookkeeping, or an earlier equation) is
+    refused. Replacing a measured value kept that measurement's original pass
+    flags and yield next to the new value. Callers re-applying equations must
+    therefore pass the frame without the previous ``derived_names``.
     """
     from chipify.plugin_loader import get_expression_plugins
     plugin_equations: list[dict[str, str]] = []
@@ -88,6 +94,13 @@ def apply_scalar_equations(
         name = eq.get("name", "").strip()
         expr = eq.get("expr", "").strip()
         if not name or not expr:
+            continue
+        if name in df.columns:
+            log_lines.append(
+                f"[✗] {name} = {expr}  →  '{name}' already exists in the results "
+                f"(a measurement, input or earlier equation); choose another name"
+            )
+            log.warning("Scalar equation %r refused: the column already exists.", name)
             continue
         try:
             df = _evaluator.evaluate_dataframe_column(df, name, expr)

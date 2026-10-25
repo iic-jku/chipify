@@ -35,18 +35,23 @@ Contract
 ``run_log_tail(n_lines)``
     Optional: tail of the most recent ``run()``'s simulator log, used to
     attach a diagnostic to analysis-capture failures.
+``capture_error(kind)``
+    Optional: why the most recent ``run()`` wrote no tab file for analysis
+    *kind* (for example a declared signal missing from the output). Takes
+    precedence over the log tail in the capture-failure note.
 """
 from __future__ import annotations
 
+import signal
 from abc import ABC, abstractmethod
 
 
-def extract_error_line(log_text: str) -> str:
+def extract_error_line(log_text: str, *, fallback: bool = True) -> str:
     """Pull the most relevant single line from a simulator log (best-effort).
 
     Prefers the first line mentioning an error / missing vector; otherwise the
-    last non-empty line. Whitespace-collapsed and length-capped so it fits in a
-    one-line result-row note / CSV cell.
+    last non-empty line, or '' when *fallback* is False. Whitespace-collapsed
+    and length-capped so it fits in a one-line result-row note / CSV cell.
     """
     lines = [ln.strip() for ln in log_text.splitlines() if ln.strip()]
     if not lines:
@@ -54,8 +59,30 @@ def extract_error_line(log_text: str) -> str:
     markers = ("error", "not available", "fatal", "can't", "cannot", "no such")
     pick = next((ln for ln in lines if any(m in ln.lower() for m in markers)), "")
     if not pick:
+        if not fallback:
+            return ""
         pick = lines[-1]
     return " ".join(pick.split())[:200]
+
+
+def describe_exit_code(code: int | None) -> str:
+    """How a process ended, for an error message: exit code or killing signal.
+
+    A process killed by a signal has a negative return code. SIGKILL is what
+    the Linux out-of-memory killer sends, so it is named as the likely cause:
+    an OOM-killed simulation used to read as its last progress line.
+    """
+    if code is None:
+        return "exited"
+    if code >= 0:
+        return f"exited with code {code}"
+    try:
+        name = signal.Signals(-code).name
+    except ValueError:
+        return f"was killed by signal {-code}"
+    if name == "SIGKILL":
+        return "was killed by SIGKILL (out of memory?)"
+    return f"was killed by {name}"
 
 
 class BaseSimulator(ABC):
@@ -129,6 +156,14 @@ class BaseSimulator(ABC):
 
         Used by the orchestrator to attach the engine's own error output to
         analysis-capture failure notes on the result row.
+        """
+        return ""
+
+    def capture_error(self, kind: str) -> str:
+        """Why the most recent ``run()`` wrote no tab for analysis *kind*.
+
+        '' when the engine knows no specific reason; the orchestrator then
+        records a generic note plus the line it finds in ``run_log_tail``.
         """
         return ""
 

@@ -10,6 +10,7 @@ subprocess runs.
 from __future__ import annotations
 
 import logging
+import multiprocessing
 from pathlib import Path
 
 from chipify import settings
@@ -19,8 +20,22 @@ log = logging.getLogger("chipify.engines.abort")
 ABORT_FLAG_PATH = Path(settings.FAST_TMP) / "abort.flag"
 
 
+def parent_gone() -> bool:
+    """True in a worker process whose chipify process has died.
+
+    A killed ``chipify-cli`` (or a stopped container) left its pool workers
+    running: they finished their case and went on to the cases already queued
+    for them, each starting another simulator. Workers poll this through
+    :func:`is_aborted`, so it takes the same path as the abort flag: the
+    running simulator is killed and no further case starts. Always False in
+    the main process, which has no multiprocessing parent.
+    """
+    parent = multiprocessing.parent_process()
+    return parent is not None and not parent.is_alive()
+
+
 def is_aborted() -> bool:
-    return ABORT_FLAG_PATH.exists()
+    return ABORT_FLAG_PATH.exists() or parent_gone()
 
 
 def clear_abort_flag() -> None:

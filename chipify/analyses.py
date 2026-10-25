@@ -100,6 +100,35 @@ def _lookup_signal(bucket: dict, name: str) -> np.ndarray | None:
     return None
 
 
+class CaptureError(Exception):
+    """A declared analysis signal is missing from the simulator's output."""
+
+
+def _lookup_signals(bucket: dict, signals: list[str]) -> list[np.ndarray]:
+    """Every declared signal from *bucket*, or ``CaptureError`` naming the missing.
+
+    A missing signal used to be written as a column of zeros, which persisted
+    as an apparently successful waveform CSV: a misspelled signal name plotted
+    as a flat line at 0 instead of failing the capture. ngspice's ``wrdata``
+    writes nothing for an unknown vector, so both engines now agree.
+    """
+    found: list[np.ndarray] = []
+    missing: list[str] = []
+    for sig in signals:
+        v = _lookup_signal(bucket, sig)
+        if v is None:
+            missing.append(sig)
+        else:
+            found.append(v)
+    if missing:
+        available = sorted(k for k in bucket if not k.startswith("__"))
+        raise CaptureError(
+            f"signal(s) {missing} not in the .raw output; "
+            f"available: {available[:40]}"
+        )
+    return found
+
+
 # ── Analysis hierarchy ────────────────────────────────────────────────────────
 
 class Analysis(ABC):
@@ -127,7 +156,10 @@ class Analysis(ABC):
     @abstractmethod
     def write_tab_from_raw(self, bucket: dict, out_path: str) -> None:
         """VACASK path: serialise this analysis's signals from a parsed .raw
-        bucket into a tab file that ``persist_to_csv`` can ingest."""
+        bucket into a tab file that ``persist_to_csv`` can ingest.
+
+        Raises ``CaptureError`` and writes nothing when a declared signal is
+        not in *bucket*."""
 
     @abstractmethod
     def persist_to_csv(self, src_tab: str, dest_csv: str) -> None:
@@ -156,12 +188,8 @@ class TransientAnalysis(Analysis):
             x_vec = bucket.get("time")
         if x_vec is None:
             return
-        y_vecs: list[np.ndarray] = []
-        for sig in self.signals:
-            v = _lookup_signal(bucket, sig)
-            if v is None:
-                v = np.zeros_like(np.asarray(x_vec, dtype=float))
-            y_vecs.append(np.asarray(v, dtype=float).real)
+        y_vecs = [np.asarray(v, dtype=float).real
+                  for v in _lookup_signals(bucket, self.signals)]
         _write_tab_columns(out_path, x_vec, y_vecs)
 
     def persist_to_csv(self, src_tab: str, dest_csv: str) -> None:
@@ -215,12 +243,8 @@ class DCSweepAnalysis(Analysis):
         x_vec = bucket.get("__x__")
         if x_vec is None:
             return
-        y_vecs: list[np.ndarray] = []
-        for sig in self.signals:
-            v = _lookup_signal(bucket, sig)
-            if v is None:
-                v = np.zeros_like(np.asarray(x_vec, dtype=float))
-            y_vecs.append(np.asarray(v, dtype=float).real)
+        y_vecs = [np.asarray(v, dtype=float).real
+                  for v in _lookup_signals(bucket, self.signals)]
         _write_tab_columns(out_path, x_vec, y_vecs)
 
     persist_to_csv = TransientAnalysis.persist_to_csv  # same layout / handling
@@ -264,18 +288,10 @@ class ACAnalysis(Analysis):
             return
         x_arr = np.asarray(x_vec, dtype=float).real
         y_vecs: list[np.ndarray] = []
-        for sig in self.signals:
-            v = _lookup_signal(bucket, sig)
-            if v is None:
-                z = np.zeros_like(x_arr, dtype=complex)
-                mag = np.abs(z)
-                phase = np.zeros_like(x_arr)
-            else:
-                z = np.asarray(v, dtype=complex)
-                mag = np.abs(z)
-                phase = np.degrees(np.angle(z))
-            y_vecs.append(mag)
-            y_vecs.append(phase)
+        for v in _lookup_signals(bucket, self.signals):
+            z = np.asarray(v, dtype=complex)
+            y_vecs.append(np.abs(z))
+            y_vecs.append(np.degrees(np.angle(z)))
         _write_tab_columns(out_path, x_arr, y_vecs)
 
     def persist_to_csv(self, src_tab: str, dest_csv: str) -> None:

@@ -77,7 +77,7 @@ def test_writes_csv_when_tab_present(tmp_path) -> None:
     os.makedirs(dest_dir, exist_ok=True)
     sample: dict = {}
 
-    simulator._persist_analyses(
+    failures = simulator._persist_analyses(
         [an], {"ac": str(tab)}, {"ac": dest_dir},
         run_id=7, tb_safe="tb_x", tb_path="tb_x", sample=sample,
     )
@@ -85,6 +85,43 @@ def test_writes_csv_when_tab_present(tmp_path) -> None:
     assert an.persisted is not None
     assert os.path.exists(os.path.join(dest_dir, "run_7__tb_x.csv"))
     assert "tb_x__ac_capture" not in sample
+    assert failures == []
+
+
+class _ReasonEngine:
+    """Engine stand-in that knows why it wrote no tab."""
+
+    name = "vacask"
+
+    def capture_error(self, kind: str) -> str:
+        return "signal(s) ['v(typo)'] not in the .raw output"
+
+    def run_log_tail(self, n_lines: int = 25) -> str:
+        return "Error: unrelated line from a successful run"
+
+    @staticmethod
+    def extract_error(log_text: str) -> str:
+        return log_text
+
+
+def test_engine_capture_reason_replaces_generic_note(tmp_path) -> None:
+    """The engine's own reason names the missing signal; the generic 'does the
+    testbench run its analysis?' guess and the log tail would mislead."""
+    an = _FakeAnalysis("transient")
+    sample: dict = {}
+
+    failures = simulator._persist_analyses(
+        [an], {"transient": str(tmp_path / "never_written.tab")},
+        {"transient": str(tmp_path)},
+        run_id=1, tb_safe="tb_x", tb_path="tb_x", sample=sample,
+        engine=_ReasonEngine(),
+    )
+
+    note = sample["tb_x__transient_capture"]
+    assert "v(typo)" in note
+    assert "does the testbench run" not in note
+    assert "unrelated" not in note
+    assert failures == [note]
 
 
 def test_skips_analysis_without_output_dir(tmp_path) -> None:
@@ -134,6 +171,44 @@ def test_inject_capture_before_endc_when_no_quit() -> None:
     netlist = ".control\nac dec 10 1 1e9\n.endc\n"
     out = simulator._inject_capture(netlist, "WRDATA_HERE")
     assert out.index("WRDATA_HERE") < out.index(".endc")
+
+
+def test_inject_capture_ignores_comments_mentioning_control() -> None:
+    """A comment spelling .control / .endc / quit used to anchor the injection,
+    which then landed in the comment's position, outside the real block."""
+    netlist = (
+        "* the .endc below closes the chipify .control block; quit is last\n"
+        "V1 in 0 1\n"
+        ".control\n"
+        "op\n"
+        "quit\n"
+        ".endc\n"
+    )
+    out = simulator._inject_capture(netlist, "CAP")
+    assert out.index(".control\n") < out.index("CAP") < out.index("quit\n")
+    assert out.splitlines()[0] == netlist.splitlines()[0]   # comment untouched
+
+
+def test_inject_capture_honours_the_jinja_newline_prefix() -> None:
+    """`* {{ NL }}` keeps a line inert in xschem and makes it a command for
+    chipify, so it counts as the directive itself."""
+    netlist = ".param x=1\n* {{ NL }}.control\nop\n* {{ NL }}quit\n* {{ NL }}.endc\n"
+    out = simulator._inject_capture(netlist, "CAP")
+    assert out.index("* {{ NL }}.control") < out.index("CAP") < out.index("* {{ NL }}quit")
+
+
+def test_finalize_sets_threads_only_in_real_control_blocks() -> None:
+    from chipify.engines.ngspice import NgspiceSimulator
+
+    class _T:
+        value_lst: list = []
+        analyses: list = []
+
+    netlist = "* see .control below\n.controlled_source x\n.control\nop\n.endc\n"
+    out = NgspiceSimulator()._finalize_netlist(netlist, _T())
+    assert out.count("set num_threads=1") == 1
+    assert out.index(".control\n") < out.index("set num_threads=1")
+    assert "* see .control below\n.controlled_source x\n" in out
 
 
 def test_log_capture_failures_dedupes(caplog) -> None:
@@ -260,6 +335,31 @@ def test_vacask_extract_reports_available_signals_when_no_match(monkeypatch) -> 
     assert line is None
     assert "NO_MATCHING_SIGNALS" in err
     assert "outp" in err and "outn" in err
+
+
+def test_vacask_missing_waveform_signal_is_reported_not_zero_filled(
+    monkeypatch, tmp_path,
+) -> None:
+    """A declared transient signal absent from the .raw writes no tab and hands
+    the reason back to the engine, instead of a zero-filled waveform."""
+    from chipify.analyses import TransientAnalysis
+    from chipify.engines import vacask as vacask_mod
+    x = [0.0, 1.0]
+    monkeypatch.setattr(vacask_mod.Path, "exists", lambda _self: True)
+    monkeypatch.setattr(vacask_mod, "_read_raw_file",
+                        lambda _f: {"transient": {"__x__": x, "time": x}})
+    test = _vacask_test([])
+    test.analyses = [TransientAnalysis(["v(out)"])]
+    tab = tmp_path / "tran.tab"
+    errors: dict = {}
+
+    simulator._vacask_extract_results(
+        "x.raw", test, {"transient": str(tab)}, capture_errors=errors,
+    )
+
+    # Path.exists is patched above, so ask the OS directly.
+    assert not os.path.exists(tab)
+    assert "v(out)" in errors["transient"]
 
 
 def test_vacask_extract_partial_match_is_not_an_error(monkeypatch) -> None:

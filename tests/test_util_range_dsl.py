@@ -41,6 +41,24 @@ def test_range_negative_start() -> None:
     assert result == [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0]
 
 
+def test_range_renders_integer_seeds() -> None:
+    """As floats, `seed: range(200)` rendered `.option SEED = 3.0` and stored
+    `seed = 3.0` in the results."""
+    from jinja2 import Template
+    seeds = validate_parameters({"seed": "range(1, 4)"})["seed"]
+    assert seeds == [1, 2, 3] and all(type(s) is int for s in seeds)
+    assert Template(".option SEED = {{ seed }}").render(seed=seeds[2]) == ".option SEED = 3"
+    # A whole-number float literal is still a valid range argument.
+    assert _parse_range_dsl("range(2.0)") == [0, 1]
+
+
+@pytest.mark.parametrize("expr", ["range(2.5)", "range(0, 10, 0.5)", "range(-1.5, 3)"])
+def test_range_rejects_fractional_arguments(expr) -> None:
+    """int() truncated them silently: range(2.5) swept 0 and 1."""
+    with pytest.raises(ValueError, match="whole numbers"):
+        _parse_range_dsl(expr)
+
+
 # ── linspace() ────────────────────────────────────────────────────────────────
 
 def test_linspace_basic() -> None:
@@ -220,4 +238,96 @@ def test_validate_datasheet_rejects_unknown_source() -> None:
         "tests": {"tb_x": {"source": "magic", "gain": {"min": 1}}},
     }
     with pytest.raises(SchemaError, match="source"):
+        validate_datasheet(data)
+
+
+# ── block types ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("data, where", [
+    # A list where the testbench mapping belongs became a plan with no tests.
+    ({"parameters": {"temp": [27]}, "tests": [{"tb_x": {"gain": {"min": 1}}}]},
+     r"^tests: expected a mapping of testbenches, got list"),
+    ({"parameters": [27], "tests": {"tb_x": {"gain": {"min": 1}}}},
+     r"^parameters: expected a mapping"),
+    ({"tests": {"tb_x": ["gain"]}}, r"tests\.tb_x: expected a mapping"),
+    # Limits as a list used to mean "no limits": always PASS.
+    ({"tests": {"tb_x": {"gain": [9, 11]}}}, r"tests\.tb_x\.gain: expected a mapping"),
+    ({"tests": {"tb_x": {"transient_signals": "v(out)"}}},
+     r"tests\.tb_x\.transient_signals: expected a list"),
+    ({"tests": {"tb_x": {"measure": "gain * 2"}}}, r"tests\.tb_x\.measure: expected a mapping"),
+])
+def test_validate_datasheet_rejects_wrong_block_types(data, where) -> None:
+    from chipify.schema import validate_datasheet
+    with pytest.raises(SchemaError, match=where):
+        validate_datasheet(data)
+
+
+def test_validate_datasheet_reads_empty_blocks_as_empty() -> None:
+    """`tests:` or `tb_x:` with nothing under it is a datasheet being written."""
+    from chipify.schema import validate_datasheet
+    assert validate_datasheet({"parameters": None, "tests": None}).tests == []
+    stim = validate_datasheet({"tests": {"tb_x": None, "tb_y": {"gain": None,
+                                                                "dc_signals": None}}})
+    assert [t.tb_path for t in stim.tests] == ["tb_x", "tb_y"]
+    assert stim.tests[1].value_lst[0].vmin is None
+    assert stim.tests[1].analyses == []
+
+
+# ── one results column per name ───────────────────────────────────────────────
+
+def test_validate_datasheet_rejects_measurement_shared_by_two_testbenches() -> None:
+    """Results are keyed by name: the second testbench's a0_db overwrote the
+    first one's value while its error scope still pointed at the first."""
+    from chipify.schema import validate_datasheet
+    data = {
+        "parameters": {"temp": [27]},
+        "tests": {
+            "tb_lpf_opamp": {"a0_db": {"min": 60}},
+            "tb_lpf_ac": {"a0_db": {"min": -1}},
+        },
+    }
+    with pytest.raises(SchemaError, match=r"tb_lpf_ac\.a0_db.*'tb_lpf_opamp'"):
+        validate_datasheet(data)
+
+
+def test_validate_datasheet_rejects_measure_shared_by_two_testbenches() -> None:
+    from chipify.schema import validate_datasheet
+    data = {
+        "parameters": {"temp": [27]},
+        "tests": {
+            "tb_a": {"gain": {"min": 1}},
+            "tb_b": {"bw": {"min": 1}, "measure": {"gain": "bw * 2"}},
+        },
+    }
+    with pytest.raises(SchemaError, match=r"tb_b\.gain"):
+        validate_datasheet(data)
+
+
+def test_validate_datasheet_allows_measure_for_its_own_value() -> None:
+    """A measure: entry computing a value of the same testbench is one column."""
+    from chipify.schema import validate_datasheet
+    data = {
+        "parameters": {"temp": [27]},
+        "tests": {"tb_v": {"gain": {"min": 1}, "measure": {"gain": "v_out_"}}},
+    }
+    stim = validate_datasheet(data)
+    assert [v.name for v in stim.tests[0].value_lst] == ["gain"]
+
+
+@pytest.mark.parametrize("data, where", [
+    ({"parameters": {"vdd": [1.8]},
+      "tests": {"tb_x": {"vdd": {"min": 1}}}}, r"tb_x\.vdd.*input parameter"),
+    ({"parameters": {"temp": [27]},
+      "tests": {"tb_x": {"run_id": {"min": 1}}}}, r"tb_x\.run_id"),
+    ({"parameters": {"temp": [27]},
+      "tests": {"tb_x": {"gain": {"min": 1}, "gain_pass": {"min": 1}}}},
+     r"tb_x\.gain_pass.*verdict column of 'gain'"),
+    ({"parameters": {"sim_error": [0]},
+      "tests": {"tb_x": {"gain": {"min": 1}}}}, r"parameters\.sim_error"),
+    ({"parameters": {"tb_x__error": [0]},
+      "tests": {"tb_x": {"gain": {"min": 1}}}}, r"error column of testbench 'tb_x'"),
+])
+def test_validate_datasheet_rejects_names_of_other_columns(data, where) -> None:
+    from chipify.schema import validate_datasheet
+    with pytest.raises(SchemaError, match=where):
         validate_datasheet(data)

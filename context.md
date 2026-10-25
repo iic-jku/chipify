@@ -83,12 +83,18 @@ Plugins: the Qt GUI loads `QtTabPlugin`s; legacy Tk `TabPlugin`s are detected an
 ### Process Management & Abort System (`simulator.py`)
 *   Do **NOT** use `ProcessPoolExecutor`, `Manager().Event()`, or signals to stop simulations. They fail to kill underlying Ngspice C-processes and cause RAM leaks.
 *   **The Fix:** File-based abort flag at `FAST_TMP/abort.flag` (`/tmp/sim_work/abort.flag`). The worker loop polls `os.path.exists(flag)` every 0.1 s; if found, it executes a hard `process.kill()`. GUI stop button → `simulation_controller.stop_simulation()` → `simulator.abort_simulation()`.
+*   **Orphaned workers:** `abort.is_aborted()` is also true in a worker whose chipify process died (`abort.parent_gone()`, via `multiprocessing.parent_process()`, which tracks the creating process for spawn and forkserver alike). A killed CLI therefore stops its workers through the same poll-and-kill path as the abort flag, and `simulate_case_batch` starts no further case once aborted. No signals involved.
+*   **Lost tasks:** `Pool` replaces a worker that dies abruptly but never resolves the task it was running, so that AsyncResult stays unready forever. Each worker writes its process name into a claim file per batch (`FAST_TMP/claims_*/batch_<i>`), and `simulator._LostBatchDetector` turns unready batches whose claimant has left `multiprocessing.active_children()` into `WORKER_LOST` rows. After a lost task the pool must be `terminate()`d, never `close()`d: a closed pool waits for its task cache to drain, so `join()` would never return.
 
 ### Scalar capture: chipify owns the `MY_DATA:` line (`simulator.py`)
 *   ngspice scalar measurements come back on a single `MY_DATA:` **stdout** line. **Do not hand-write `echo MY_DATA:` in a testbench** — `NgspiceSimulator._finalize_netlist` (called by `generate_test_template`) auto-injects it from the datasheet's `value_lst` (`echo MY_DATA:$&<key0> $&<key1> …`, in order) via `_inject_capture`, and strips any stale hand-written one so only chipify's survives.
+*   **Anchors are whole lines** (`ngspice._RE_CONTROL` / `_RE_ENDC` / `_RE_QUIT`): `.control`, `.endc` and `quit`/`exit` count only as their own lines, optionally behind the `* {{ NL }}` prefix testbenches use to hide a command from xschem's own simulation. Matching plain text made a comment mentioning `.control` the anchor.
 *   **The contract:** each scalar key under `tests.<tb>` must name an ngspice vector the testbench defines with `let`/`meas` — `$&<key>` has to resolve. The run side parses the same line positionally back into `value_lst`, so chipify controls both ends and the order can't drift. Waveforms work the same way: declare `transient/dc/ac_signals` and chipify injects the `wrdata`/`setplot` capture (`analyses.py`).
 *   Vacask is unaffected — it extracts scalars from the `.raw` file (named `meas` results / `measure:` exprs) or its own `printf "MY_DATA: …"`.
 *   **Imported netlists (`source: netlist` key):** a testbench may set `source: netlist` (default `xschem`) to load an existing deck at `tb/<tb_path><engine.netlist_ext>` (`.spice`/`.sim`, via `safe_tb_file`) instead of netlisting a `.sch` via xschem. The ngspice path runs the imported deck through the same `_finalize_netlist`, so managed capture is identical; vacask reads the `.sim` verbatim and captures from the `.raw` as usual. `--templates-dir` still short-circuits before the engine, so it overrides `source: netlist`.
+
+### Xschem netlists with missing symbols (`engines/xschem.py`)
+*   `run_xschem` rejects a SPICE netlist containing xschem's `* <inst> - <sym> IS MISSING !!!!` comment (`missing_symbols`), which fails that testbench via `template_error`. The exit code cannot be used: xschem 3.4.8RC returns rc=10 for clean schematics too. `--spectre` netlists drop a missing instance with no marker, so the VACASK xschem path is not covered.
 
 ### Safe Expression Evaluation (`expression.py`)
 *   **Never** call Python `eval()`, `exec()`, or `df.eval(engine='python')` directly in user-facing code.
@@ -105,6 +111,14 @@ Plugins: the Qt GUI loads `QtTabPlugin`s; legacy Tk `TabPlugin`s are detected an
 ### Sweep vs Output Column Separation
 *   The "Corner Yield Matrix" requires discrete inputs. Mixing continuous output columns causes a pivot table crash.
 *   **The Fix:** `data_loader.compute_plot_cols()` returns a typed `PlotColumns` dataclass separating `sweep_params` from numeric output columns. `data_loader.valid_rows(df)` is the single filter for `sim_error == 'None'`.
+
+### No vacuous plans
+*   `validate_datasheet` rejects a block of the wrong type (`_mapping_block`, list-valued limits, string-valued `*_signals`, non-mapping `measure:`); it used to skip them, so a list under `tests:` became an empty plan. Empty (`null`) blocks still load, because a datasheet is built up in the GUI.
+*   `run_sim` refuses a plan with no testbench, or a testbench with no measurement, `measure:` or signals (`_check_executable_plan`): every case of such a plan comes back without a verdict column, and `global_pass` reads that as passed.
+*   It also refuses to dispatch when *no* testbench could be netlisted (`_check_any_netlist`). One failed testbench still fails only its own rows; the rule only stops a run whose every case is a foregone failure.
+
+### One results column per name (`schema._check_result_columns`)
+*   Results are stored by name alone (`sample[name]` per run), so `validate_datasheet` rejects a measurement (value or `measure:` entry) declared by two testbenches, a measurement named like an input parameter, and any datasheet name equal to a column chipify writes itself (`data_loader.RESERVED_COLUMNS`, `<tb>__error`, `<tb>_overall_pass`, `<measurement>_pass`). A shared column let one testbench overwrite another's value while the error scope still pointed at the first.
 
 ### Error Handling in DataFrames
 Errors are recorded at **two scopes**, because a datasheet can hold several testbenches and one of them failing must not invalidate the others.
@@ -128,6 +142,10 @@ Yield *visualisations* use `data_loader.effective_pass(df)`, not `global_pass`: 
 
 `run_sim` returns `None` **only** on user abort; every other failure raises, so callers must report it rather than mistake it for a cancellation.
 
+A run reloaded from history (`HistoryController.on_select`, `cli._load_finished_run`) goes through `data_loader.regrade(df, stim)`: every view prints the datasheet's *current* limits, so the saved `<name>_pass` / `<tb>_overall_pass` flags are recomputed with `Value.isPass` against them. No datasheet snapshot is stored with a run, so "the verdict at the time" cannot be reconstructed.
+
+A declared analysis (`transient/dc/ac_signals`) that produced no waveform CSV is a **testbench error** (`CAPTURE_ERROR`, recorded through `_record_error`), not only the `<tb>__<kind>_capture` diagnostic note: as a note alone it left `sim_error` `'None'` and the run passing with its curves missing. Engines name the cause through `BaseSimulator.capture_error(kind)`; the VACASK writers raise `analyses.CaptureError` for a declared signal missing from the `.raw` and never substitute zeros.
+
 ### Auto-generated reports (`reports.py` + `report_service.py`)
 *   The datasheet's optional `reports:` block declares which figures and reports a run should produce; `schema._validate_reports` turns it into a `ReportsConfig` on `Stimuli.reports`, exactly as `equations:` becomes `Stimuli.equations`.
 *   `PLOT_TYPES` in `reports.py` is the **single registry** the validator, the renderer and the tests read. Adding a plot type is one entry — a type that is not in the render matrix fails `test_registry_and_test_matrix_stay_in_step`.
@@ -135,6 +153,10 @@ Yield *visualisations* use `data_loader.effective_pass(df)`, not `global_pass`: 
 *   Each plot is rendered under its own guard: a spec naming a missing measurement, or a waveform directory that was never produced, records a warning in `ReportResult.warnings` and the remaining plots still render. `latex` is only honoured for the types whose `PlotType.supports_latex` is true.
 *   Output goes to `out/reports/<timestamp>/` with an `out/reports/.latest` pointer — the convention `simulator.write_analysis_pointers` uses for analysis data.
 *   Opt-in: `chipify-cli --reports`, or the GUI's *Generate Reports* button (which works on whatever run is loaded, including one picked from history).
+
+### Loaded results keep their datasheet
+*   `Stimuli.yaml_path` records the file a plan was parsed from. `MainWindow._run_report_job` and `reapply_equations` use the loaded stim's path (`_results_yaml_path`), not the datasheet combo: the combo can change without a reload (the ↺ rescan resets it), and a report once paired the selected datasheet's path with another run's tests.
+*   Selecting a datasheet (`_on_datasheet_changed`, `set_active_datasheet`) clears the results and loads that datasheet's newest run, so the tabs never show one datasheet's run under another's name.
 
 ### One report path, one run-selection, one formatter
 *   `report_service.generate_reports(..., config=...)` overrides the datasheet's block. That override *is* the one-click PDF: `MainWindow` has a single `_run_report_job` helper and no separate `export_pdf`, so both write to `out/reports/<timestamp>/` and share the guard / status / dialog handling. A PDF must never land loose in `out/reports/` again.
@@ -146,6 +168,7 @@ Yield *visualisations* use `data_loader.effective_pass(df)`, not `global_pass`: 
 ### Batch runs and the combined report (`cli.py`, `report_service.generate_batch_report`)
 *   `--batch` gives every datasheet its own output root, `out/<stem>/`: results, `history/`, `analysis_data/` (via `run_sim(out_dir=…)` and `write_analysis_pointers(…, out_dir)`) and `reports/`. Run ids restart at `000000` for every run, so a shared waveform folder let two datasheets on one testbench read each other's curves without any error. Waveforms always live under the run's own output root.
 *   Sidecars store `analysis_dirs` relative to that root (`run_meta.output_root`). `run_meta.analysis_dirs_for` resolves them (old absolute paths still work), and `data_loader.load_csv` restores them into `df.attrs`, so a reloaded history run finds its own waveforms rather than the `.latest` pointer's.
+*   Recorded directories are authoritative: `transient_loader.resolve_analysis_dir` returns `""` when the run recorded its waveform directories but the one for that kind is missing or was never captured. The `.latest` / newest-subdir guesses are only for runs that recorded none.
 *   The combined PDF is a summary page followed by the datasheets' own report PDFs, merged with pypdf (`pdf_export.generate_batch_pdf`): **nothing is rendered twice**. The summary is laid out before it is drawn, so its page count, and with it every section's start page, is known up front. A datasheet whose `reports:` block asks for no PDF gets one rendered in a scratch dir for the combined report only; its own outputs stay exactly as declared.
 *   Summary numbers come from `result_summary` / `measurement_rows`, the same as each datasheet's cover. `--report-only` rebuilds everything from each datasheet's newest `history/run_*.csv`.
 *   The CLI pins matplotlib's Agg backend at the top of `main()`: `pdf_export` draws through pyplot, which picks QtAgg when a display and PySide6 are present and then hangs a headless run.
@@ -166,6 +189,7 @@ Yield *visualisations* use `data_loader.effective_pass(df)`, not `global_pass`: 
 ### Equations panel edits
 *   The table is a staging area that `▶ Apply` persists — but **removing a row saves immediately**, because a deletion left pending was reverted by the next `reload()` and looked like "I cannot delete this". Add/edit still need Apply.
 *   `_dirty` tracks hand edits (`itemChanged`, suppressed while `_loading`), so a `reload()` that drops unsaved work says so rather than reverting silently. `_apply()` returns a bool so a removal knows whether it actually persisted.
+*   **Equations only add columns.** `equation_service.apply_scalar_equations` refuses an equation whose name is already a column of the frame (measurement, input, bookkeeping, earlier equation): a replaced measurement kept its simulated pass flags. `MainWindow.reapply_equations` therefore drops the previous `derived_cols` before re-applying, which is exactly the frame as simulated; a removed or newly failing equation would otherwise keep its old column.
 
 ### Editing `reports:` from the GUI (`gui_qt/widgets/reports_dialog.py`)
 *   Opened by **Reports…** in the Datasheet Editor toolbar, because the block belongs to the datasheet — chipify's paradigm is that a datasheet is fully buildable from the GUI.
@@ -182,12 +206,14 @@ Yield *visualisations* use `data_loader.effective_pass(df)`, not `global_pass`: 
 ### Waveform-curve hover (`uikit/services/curve_hover.py`)
 *   Consumes the ``line_map`` (``Line2D -> (run_id, signal)``) the three overlay plotters already return; the Plots tab and the dashboard cell cache one `CurveHoverState` per redraw and hand it over, because `get_state` runs on every mouse move.
 *   **Never** `Line2D.contains()` in a loop (~150 ms per mouse move at `RUN_CAP` runs) and **never** `canvas.draw_idle()` per event (~1 s at 500 curves — the scatter hover can afford it, an overlay cannot). Each axes gets a lazily built index of its curves in *scale space*; only the `transLimits + transAxes` affine is re-read per event, so pan/zoom/resize need no rebuild, and the bubble is blitted over a saved background. Measured: 4 ms per hover against 406 ms for one redraw.
+*   **Never decimate the index.** Striding through the samples (the old 120k cap) made the hover name the wrong run in dense overlays. `_CurveIndex` keeps every sample and groups them into at most `MAX_INDEX_CHUNKS` chunks with scale-space bounding boxes; a hit tests the boxes, then measures only the segments of the chunks within reach, which gives exactly the brute-force answer.
 *   Distance is to the drawn **segment**, in **pixels**, and the *nearest* curve wins: a sparse DC sweep is hoverable between its samples, a log x axis is not measured in decades, and 500 overlapping Monte-Carlo curves do not all answer with the lowest run id.
 *   A log axis maps `x <= 0` to the sentinel `-1000`, not `-inf`, so non-positive samples are masked on the raw values before transforming — otherwise a phantom point a thousand decades left wins every hit near the axes edge. Samples either side of a NaN dropout are never joined into a segment, because matplotlib draws a gap there.
 *   `line_map` keys are the six-digit ids from the `run_<id>__<tb>.csv` filenames; the results frame's `run_id` reads back from CSV as an int. The run lookup goes through `transient_loader.pad_run_id`, as `run_pass_map` / `run_group_map` do.
 *   Both hover managers can share one canvas (the dashboard cell): their `get_state` callbacks are mutually exclusive on the cell's mode, and both are invalidated *before* each redraw, which is what also covers the cell's error branch.
 *   The hovered curve is also drawn thicker, opaque and above its neighbours. Unlike the bubble it is an **ordinary artist**, so: the blit pass redraws it over the restored background (the thicker stroke covers the thin one already there, and simply not drawing it is what un-highlights); its original linewidth/alpha/zorder are saved and put back on every exit path — miss, leave, `invalidate()`; and when a real draw catches it mid-highlight, `_on_draw` restores it, *discards* the frame it just saved and schedules one more draw, because a background with the thick curve baked in would smear it until the next redraw.
 *   The bubble is animated so ordinary draws skip it — but `savefig` draws animated artists, so leaving the canvas hides it (and restores the curve), keeping both out of `Export…`, the toolbar's own Save, and the TeX export.
+*   `HoverBubble._place` works in **physical** pixels (`get_width_height(physical=True)`, `OFFSET` converted from points), like events and window extents, and positions the bubble's box explicitly: beside the point where it fits, else clamped inside the canvas. Before measuring it calls `update_positions` and `update_bbox_position_size`, because both the text's offset transform and the rounded box are otherwise laid out only by the next draw.
 *   `HoverBubble.show` makes the annotation visible *before* measuring it: `Text.get_window_extent` reports a 1-pixel box for a hidden artist, so the edge-flip silently never fired and a tall tooltip near the top of the canvas was drawn off it.
 
 ---
