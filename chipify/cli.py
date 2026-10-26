@@ -166,6 +166,7 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
     print_summary(df, stim)
 
     summary = _json_summary(df, yaml_path.name, duration_s)
+    summary["run"] = saved.history_csv.name if saved.history_csv else ""
     entry = report_service.BatchEntry(yaml_path, out_dir, df=df, stim=stim,
                                       duration_s=duration_s, summary=summary)
     if reports:
@@ -188,13 +189,15 @@ def _report_unfinished(out_dir, yaml_path) -> None:
 
 
 def _load_finished_run(yaml_path: str | os.PathLike[str], *,
-                       out_dir: str | os.PathLike[str], json_out: bool = False):
+                       out_dir: str | os.PathLike[str], json_out: bool = False,
+                       run: str = "", reports: bool = True):
     """Load one datasheet's newest finished run and write its reports.
 
     The ``--report-only`` counterpart of :func:`_run_single`: nothing is
     simulated. Results, duration and waveform directories come from the newest
-    ``<out_dir>/history/run_*.csv`` recorded for this datasheet. Returns the
-    ``report_service.BatchEntry``, or None when there is no such run.
+    ``<out_dir>/history/run_*.csv`` recorded for this datasheet, or from *run*
+    (a history CSV name) when given. Returns the ``report_service.BatchEntry``,
+    or None when there is no such run.
     """
     from chipify import data_loader as _dl
     from chipify import report_service, run_meta
@@ -203,8 +206,11 @@ def _load_finished_run(yaml_path: str | os.PathLike[str], *,
     print(f"[*] Loading finished run: {yaml_path.name}")
     runs = [label for label in _dl.list_history_runs(out_dir, yaml_name=yaml_path.name)
             if label.startswith("run_")]
+    if run:
+        runs = [label for label in runs if label == run]
     if not runs:
-        print(f"[-] No finished run of {yaml_path.name} in {out_dir / 'history'}")
+        print(f"[-] No finished run of {yaml_path.name} in {out_dir / 'history'}"
+              + (f" named {run}" if run else ""))
         return None
     csv_path = out_dir / "history" / runs[0]
     stim = util.Stimuli(yaml_path)
@@ -215,10 +221,12 @@ def _load_finished_run(yaml_path: str | os.PathLike[str], *,
     print(f"[+] Using {csv_path}")
 
     summary = _json_summary(df, yaml_path.name, duration_s or 0.0)
+    summary["run"] = csv_path.name
     entry = report_service.BatchEntry(yaml_path, out_dir, df=df, stim=stim,
                                       duration_s=duration_s, summary=summary)
-    entry.reports = _generate_reports(df, stim, yaml_path, out_dir, duration_s)
-    summary["reports_dir"] = str(entry.reports.out_dir)
+    if reports:
+        entry.reports = _generate_reports(df, stim, yaml_path, out_dir, duration_s)
+        summary["reports_dir"] = str(entry.reports.out_dir)
     if json_out:
         print(json.dumps(summary))
     return entry
@@ -440,8 +448,9 @@ def main():
         parser.error("--resume simulates; --report-only does not")
     if args.resume and args.templates_dir:
         parser.error("--resume uses the netlists the run started with, not --templates-dir")
-    if args.resume and args.batch:
-        parser.error("--resume continues one datasheet's run: use it with -c, not --batch")
+    if args.resume and args.only:
+        parser.error("--resume continues the batch with the datasheets it started with; "
+                     "drop --only")
 
     # One output root for everything this invocation writes. The settings
     # overrides go to run_sim, which pins them for its workers.
@@ -459,24 +468,39 @@ def main():
 
     # ── Batch mode ────────────────────────────────────────────────────────────
     if args.batch:
-        from chipify import project_config, report_service
+        from chipify import project_config, report_service, run_store
 
         batch_dir = Path(args.batch)
-        found = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
-        if not found:
-            print(f"[-] No *.yaml files found in: {batch_dir}")
-            sys.exit(1)
-        yaml_files = _select_datasheets(found, args.only)
-        if not yaml_files:
-            print(f"[-] --only {' '.join(args.only)} matched no datasheet in "
-                  f"{batch_dir} (there are: {', '.join(p.stem for p in found)})")
-            sys.exit(1)
-
-        if args.only:
-            print(f"[*] Batch mode: {len(yaml_files)} of {len(found)} datasheet(s) "
-                  f"selected in {batch_dir}")
+        record = None
+        if args.resume:
+            record = run_store.find_unfinished_batch(out_root, batch_dir)
+            if record is None:
+                print(f"[-] Nothing to resume for {batch_dir}: its newest batch in "
+                      f"{out_root / run_store.BATCH_DIR} finished, or it has none.")
+                sys.exit(1)
+            yaml_files = [batch_dir / name for name in record.names()]
+            finished = sum(record.state(name) == "done" for name in record.names())
+            print(f"[*] Resuming batch_{record.ts}: {finished} of {len(yaml_files)} "
+                  f"datasheet(s) done")
         else:
-            print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")
+            found = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
+            if not found:
+                print(f"[-] No *.yaml files found in: {batch_dir}")
+                sys.exit(1)
+            yaml_files = _select_datasheets(found, args.only)
+            if not yaml_files:
+                print(f"[-] --only {' '.join(args.only)} matched no datasheet in "
+                      f"{batch_dir} (there are: {', '.join(p.stem for p in found)})")
+                sys.exit(1)
+
+            if args.only:
+                print(f"[*] Batch mode: {len(yaml_files)} of {len(found)} datasheet(s) "
+                      f"selected in {batch_dir}")
+            else:
+                print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")
+            if not args.report_only:
+                record = run_store.begin_batch(out_root, batch_dir,
+                                               [p.name for p in yaml_files], args.only)
         summaries = []
         entries = []
         all_ok = True
@@ -486,18 +510,30 @@ def main():
             # overwrite each other's simulation_results.csv.
             stem = yaml_path.stem
             run_out_dir = out_root / stem
+            state = record.state(yaml_path.name) if args.resume else "pending"
             error = "no finished run" if args.report_only else "no data"
             try:
                 if args.report_only:
                     entry = _load_finished_run(yaml_path, out_dir=run_out_dir,
                                                json_out=args.json)
+                elif state == "done":
+                    # Finished before the batch was interrupted: its run is
+                    # loaded, not simulated again.
+                    entry = _load_finished_run(yaml_path, out_dir=run_out_dir,
+                                               json_out=args.json, reports=args.reports,
+                                               run=record.run(yaml_path.name))
                 else:
-                    entry = _run_single(yaml_path, json_out=args.json,
-                                        simulator_override=args.simulator,
-                                        templates_dir=args.templates_dir,
-                                        progress_stream=args.progress_stream,
-                                        out_dir=run_out_dir, reports=args.reports,
-                                        overrides=overrides)
+                    if record is not None:
+                        record.set(yaml_path.name, "running")
+                    entry = _run_single(
+                        yaml_path, json_out=args.json,
+                        simulator_override=args.simulator,
+                        templates_dir=args.templates_dir,
+                        progress_stream=args.progress_stream,
+                        out_dir=run_out_dir, reports=args.reports,
+                        overrides=overrides,
+                        resume=(args.resume and run_store.find_unfinished(
+                            run_out_dir, yaml_path.name) is not None))
             except Exception as exc:  # noqa: BLE001 — one bad datasheet must not end the batch
                 # The datasheet is parsed before _run_single's own guard: a
                 # malformed YAML ended the whole batch, so every later datasheet
@@ -507,6 +543,9 @@ def main():
                 entry = None
                 error = " ".join(str(exc).split())[:200] or type(exc).__name__
                 print(f"[-] {yaml_path.name}: {error}")
+            if record is not None and state != "done":
+                record.set(yaml_path.name, "failed" if entry is None else "done",
+                           run="" if entry is None else entry.summary.get("run", ""))
             if entry is None:
                 all_ok = False
                 entry = report_service.BatchEntry(
@@ -517,6 +556,8 @@ def main():
             entries.append(entry)
             summaries.append(entry.summary)
 
+        if record is not None:
+            record.finish()
         batch_line = {"batch_summary": summaries}
         if args.reports or args.report_only:
             print(f"\n{'='*60}")

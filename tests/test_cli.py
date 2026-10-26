@@ -502,11 +502,102 @@ def test_resume_refuses_an_edited_datasheet(project, monkeypatch, capsys):
     assert project["calls"] == []
 
 
-@pytest.mark.parametrize("argv", [
-    ("--report-only",), ("--templates-dir", "x"), ("--batch", "datasheets")])
+@pytest.mark.parametrize("argv", [("--report-only",), ("--templates-dir", "x")])
 def test_resume_conflicts(project, monkeypatch, capsys, argv):
     code, _ = _main(monkeypatch, capsys, "-c", "alpha.yaml", "--resume", *argv)
     assert code == 2
+
+
+def test_a_resumed_batch_keeps_its_own_selection(project, monkeypatch, capsys):
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                    "--resume", "--only", "alpha")
+    assert code == 2
+
+
+def _three_datasheets(project):
+    (project["batch"] / "gamma.yaml").write_text(
+        _DATASHEET.format(description="gamma checks"), encoding="utf-8")
+
+
+def _results_for(stim, out_dir, resume=None):
+    from chipify import simulator
+
+    df = _results()
+    df.attrs["analysis_dirs"] = simulator._create_analysis_dirs(stim, out_dir)
+    if resume is not None:
+        df.attrs["run_ts"] = resume.ts
+    return df
+
+
+def test_a_batch_that_died_resumes_where_it_stopped(project, monkeypatch, capsys):
+    """A batch killed in its second datasheet: --resume loads the first one's
+    run, continues the second one's and starts the third."""
+    from chipify import run_store, simulator
+
+    _three_datasheets(project)
+    calls = []
+
+    def killed_in_beta(stim, *, out_dir=None, **_kw):
+        name = Path(stim.yaml_path).name
+        calls.append(name)
+        if name == "beta.yaml":
+            ts = run_store.new_run_ts(out_dir)
+            journal = run_store.begin_run(stim, out_dir, ts, planned_runs=3,
+                                          analysis_dirs={}, run_settings={},
+                                          engines={"tb": "ngspice"})
+            journal.append(_results().to_dict("records")[:2])
+            journal.close()
+            raise KeyboardInterrupt          # the process ends here
+        return _results_for(stim, out_dir)
+
+    monkeypatch.setattr(simulator, "run_sim", killed_in_beta)
+    with pytest.raises(KeyboardInterrupt):
+        _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert calls == ["alpha.yaml", "beta.yaml"]
+    capsys.readouterr()
+
+    resumed = []
+
+    def finishes(stim, *, out_dir=None, resume=None, **_kw):
+        resumed.append((Path(stim.yaml_path).name,
+                        sorted(resume.done_rows()) if resume else None))
+        return _results_for(stim, out_dir, resume)
+
+    monkeypatch.setattr(simulator, "run_sim", finishes)
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--resume", "--reports", "--json")
+    assert code == 0
+    assert resumed == [("beta.yaml", ["000000", "000001"]), ("gamma.yaml", None)]
+    batch = lines[-1]
+    assert [s["yaml"] for s in batch["batch_summary"]] == [
+        "alpha.yaml", "beta.yaml", "gamma.yaml"]
+    assert all(s["run"].startswith("run_") for s in batch["batch_summary"])
+    assert _outline_titles(batch["combined_report"]) == ["Summary", "alpha", "beta", "gamma"]
+
+    # Finished now: there is nothing left to resume.
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]), "--resume")
+    assert code == 1
+
+
+def test_a_batch_that_ran_to_the_end_is_not_resumed(project, monkeypatch, capsys):
+    """Failed datasheets of a batch that finished are rerun with --only, not
+    --resume: resuming is for batches that were cut short."""
+    from chipify import simulator
+
+    def beta_fails(stim, *, out_dir=None, **_kw):
+        if Path(stim.yaml_path).name == "beta.yaml":
+            raise RuntimeError("no netlist")
+        return _results_for(stim, out_dir)
+
+    monkeypatch.setattr(simulator, "run_sim", beta_fails)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert code == 1
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "--batch", str(project["batch"]),
+                                      "--resume"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert "Nothing to resume" in capsys.readouterr().out
 
 
 def test_order_datasheets_accepts_names_and_stems(tmp_path, caplog):

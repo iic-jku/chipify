@@ -17,6 +17,10 @@ Preparation for the initial public release.
   cases without a result (or lost with a worker process) are simulated, with
   the run's own netlists and settings; it is refused when the datasheet has
   changed since the run started.
+- `chipify-cli --batch DIR --resume` continues a batch that was cut short,
+  from its record in `out/batches/`: datasheets that had finished are loaded
+  instead of simulated again, the interrupted one resumes its run, the others
+  start. Each JSON summary line now names its history run (`"run"`).
 - `chipify-cli` options for one invocation, without editing `settings.json`:
   `--cores N` and `--timeout SEC` replace `num_cores` and `sim_timeout_sec`,
   `--out DIR` replaces the output folder (results, history, waveforms,

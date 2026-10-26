@@ -157,6 +157,13 @@ example a longer timeout for the cases that timed out. It is refused if the
 datasheet changed since the run started, and only the datasheet's newest run
 can be continued. A run stopped in the GUI can be continued this way too.
 
+A batch keeps a record of how far it got (`out/batches/batch_<ts>.json`).
+`chipify-cli --batch ./datasheets --resume` continues the newest batch of that
+folder if it was cut short: datasheets that had finished are loaded, not
+simulated again (they still appear in the summary and the combined report),
+the interrupted one resumes its run, and the rest start. A batch that ran to
+the end is not resumed; rerun its failed datasheets with `--only`.
+
 A datasheet's optional one-line `description:` (top-level key, also editable in
 the GUI's Datasheet Editor) appears on its report cover and on the summary
 page. An optional `project.yaml` in the project root sets the batch report's

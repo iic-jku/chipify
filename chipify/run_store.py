@@ -27,6 +27,9 @@ keeps its sidecar, datasheet copy, templates and journal, and ``--resume``
 continues it (:func:`find_unfinished`). History listings only show
 ``run_*.csv``, so an unfinished run never passes for a finished one.
 
+A ``--batch`` keeps a record of its own (:class:`BatchRecord`), so a batch
+that dies midway resumes without simulating its finished datasheets again.
+
 Results used to be written only after the last case: one interrupted case
 lost all the others. The CLI and the GUI also saved them each in their own
 way, and the two drifted apart: only the GUI archived the templates.
@@ -334,6 +337,111 @@ def continue_run(run: UnfinishedRun, *, run_settings: dict) -> RunJournal:
         run.csv, resumed=[*run.meta.get("resumed", []), stamp],
         settings=run_settings) or run.meta
     return RunJournal(run.journal)
+
+
+# ── A batch in progress ───────────────────────────────────────────────────────
+
+#: Folder in the output root that holds the ``--batch`` records.
+BATCH_DIR = "batches"
+
+
+class BatchRecord:
+    """Where a ``--batch`` run got to: ``<out>/batches/batch_<ts>.json``.
+
+    Lists the batch's datasheets in order, each ``pending``, ``running``,
+    ``done`` (with its history run) or ``failed``, and is rewritten whole
+    after every change. A batch that dies midway can then be continued with
+    ``--batch DIR --resume``: finished datasheets are not simulated again, the
+    interrupted one resumes its run, the rest start.
+    """
+
+    def __init__(self, path: Path | None, data: dict) -> None:
+        self.path = path
+        self.data = data
+
+    @property
+    def ts(self) -> str:
+        return self.path.stem[len("batch_"):] if self.path is not None else ""
+
+    def names(self) -> list[str]:
+        return [str(item["yaml"]) for item in self.data["datasheets"]]
+
+    def _item(self, yaml_name: str) -> dict:
+        return next(item for item in self.data["datasheets"] if item["yaml"] == yaml_name)
+
+    def state(self, yaml_name: str) -> str:
+        return str(self._item(yaml_name).get("state", "pending"))
+
+    def run(self, yaml_name: str) -> str:
+        return str(self._item(yaml_name).get("run", "") or "")
+
+    def set(self, yaml_name: str, state: str, run: str = "") -> None:
+        item = self._item(yaml_name)
+        item["state"] = state
+        if run:
+            item["run"] = run
+        self._write()
+
+    def finish(self) -> None:
+        self.data["complete"] = True
+        self._write()
+
+    def _write(self) -> None:
+        if self.path is None:
+            return
+        try:
+            # Replaced whole, never rewritten in place: a batch killed during
+            # the write still leaves the previous, readable record.
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("Could not update the batch record %s: %s", self.path, exc)
+
+
+def begin_batch(out_dir, batch_dir, yaml_names: list[str],
+                only: list[str] | None = None) -> BatchRecord:
+    """Write the record of a ``--batch`` run about to start."""
+    folder = Path(out_dir) / BATCH_DIR
+    data = {
+        "schema_version": 1,
+        "started": datetime.datetime.now().isoformat(timespec="seconds"),
+        "batch_dir": str(Path(batch_dir).resolve()),
+        "only": list(only or []),
+        "complete": False,
+        "datasheets": [{"yaml": name, "state": "pending", "run": ""}
+                       for name in yaml_names],
+    }
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        log.warning("Could not start the batch record, it cannot be resumed: %s", exc)
+        return BatchRecord(None, data)
+    base = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts, n = base, 1
+    while (folder / f"batch_{ts}.json").exists():
+        n += 1
+        ts = f"{base}_{n}"
+    record = BatchRecord(folder / f"batch_{ts}.json", data)
+    record._write()
+    return record
+
+
+def find_unfinished_batch(out_dir, batch_dir) -> BatchRecord | None:
+    """The batch of *batch_dir* to resume: its newest batch, if unfinished."""
+    folder = Path(out_dir) / BATCH_DIR
+    if not folder.is_dir():
+        return None
+    target = str(Path(batch_dir).resolve())
+    for path in sorted(folder.glob("batch_*.json"), reverse=True):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("batch_dir") != target:
+            continue
+        return None if data.get("complete") else BatchRecord(path, data)
+    return None
 
 
 # ── A finished run ────────────────────────────────────────────────────────────
