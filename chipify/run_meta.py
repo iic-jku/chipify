@@ -59,11 +59,18 @@ def _ngspice_version() -> str:
     """``ngspice-<n>`` from ``ngspice --version``.
 
     The banner opens with a row of asterisks, which is what the sidecar used
-    to record as the version.
+    to record as the version. Where only the Windows GUI build of ngspice is
+    installed the version stays unknown: probing it opened a window for every
+    sidecar written.
     """
+    from chipify.engines.base import console_ngspice
+
+    exe = console_ngspice()
+    if exe is None:
+        return ""
     try:
         result = subprocess.run(
-            ["ngspice", "--version"], capture_output=True, text=True, timeout=5
+            [exe, "--version"], capture_output=True, text=True, timeout=5
         )
     except Exception:
         return ""

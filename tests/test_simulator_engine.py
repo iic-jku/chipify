@@ -463,6 +463,35 @@ def test_ngspice_crash_names_the_cause(tmp_path, monkeypatch, log_text, code,
     assert "\n" not in error
 
 
+@pytest.mark.parametrize("windows, console_build, expected", [
+    (True, r"D:\EDA\Spice64\bin\ngspice_con.exe", "ngspice_con"),
+    (True, None, "ngspice"),       # a simulation must still run
+    (False, None, "ngspice"),
+])
+def test_ngspice_runs_the_console_build(tmp_path, monkeypatch, windows,
+                                        console_build, expected) -> None:
+    """ngspice.exe on Windows is a GUI program that opened a window for every
+    simulation; its console build ngspice_con.exe sits next to it."""
+    from chipify import settings
+    from chipify.engines import base
+    from chipify.engines import ngspice as ng_mod
+
+    monkeypatch.setattr(settings, "FAST_TMP", str(tmp_path))
+    monkeypatch.setattr(base, "_WINDOWS", windows)
+    monkeypatch.setattr(base.shutil, "which",
+                        lambda name: console_build if name == "ngspice_con" else None)
+    started = []
+    fake = _fake_ngspice("MY_DATA: 1\n", 0)
+
+    def recording(cmd, **kw):
+        started.append(cmd[0])
+        return fake(cmd, **kw)
+
+    monkeypatch.setattr(ng_mod.subprocess, "Popen", recording)
+    assert ng_mod.NgspiceSimulator().run("* deck\n") == ("MY_DATA: 1", None)
+    assert started == [expected]
+
+
 def test_vacask_crash_is_one_line_with_exit_code_and_error(tmp_path, monkeypatch) -> None:
     """The last five log lines went into the cell verbatim (caret line and
     file offsets included), with no exit code."""

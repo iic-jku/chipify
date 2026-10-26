@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from chipify import run_meta
 
 
@@ -40,13 +42,40 @@ def test_ngspice_version_is_the_version_not_the_banner_border(monkeypatch) -> No
     """The first line of `ngspice --version` is a row of asterisks."""
     import subprocess
 
+    from chipify.engines import base
+
     banner = ("******\n"
               "** ngspice-47 : Circuit level simulation program\n"
               "** Compiled with KLU Direct Linear Solver\n")
+    monkeypatch.setattr(base, "_WINDOWS", False)     # the parsing, on any platform
     monkeypatch.setattr(run_meta.subprocess, "run", lambda *a, **k:
                         subprocess.CompletedProcess(a, 0, stdout=banner, stderr=""))
     from tests.conftest import REAL_NGSPICE_VERSION   # conftest stubs the probe
     assert REAL_NGSPICE_VERSION() == "ngspice-47"
+
+
+@pytest.mark.parametrize("console_build", [None, r"D:\EDA\Spice64\bin\ngspice_con.exe"])
+def test_the_windows_probe_never_starts_the_gui_ngspice(monkeypatch, console_build) -> None:
+    """ngspice.exe on Windows is a GUI program: every sidecar opened a window."""
+    import subprocess
+    from chipify.engines import base
+    from tests.conftest import REAL_NGSPICE_VERSION
+
+    monkeypatch.setattr(base, "_WINDOWS", True)
+    monkeypatch.setattr(base.shutil, "which",
+                        lambda name: console_build if name == "ngspice_con" else None)
+    calls = []
+
+    def fake_run(cmd, **_kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="** ngspice-46 : Circuit", stderr="")
+
+    monkeypatch.setattr(run_meta.subprocess, "run", fake_run)
+    version = REAL_NGSPICE_VERSION()
+    if console_build is None:
+        assert calls == [] and version == ""
+    else:
+        assert calls == [["ngspice_con", "--version"]] and version == "ngspice-46"
 
 
 # ── Waveform directories: relative to the output root ─────────────────────────

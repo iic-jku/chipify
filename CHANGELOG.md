@@ -90,6 +90,11 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- On Windows, where `ngspice.exe` is a GUI program, chipify opened an ngspice
+  window for every simulation and again for every run sidecar (to read the
+  version). It now starts the console build `ngspice_con.exe` that ships next
+  to it; when only the GUI build is installed, simulations still use it but
+  the sidecar leaves the version empty instead of opening a window.
 - The optional PyOPUS reader for VACASK `.raw` files never ran: chipify
   imported a `RawFile` class that PyOPUS does not have (it exposes
   `raw_read`), and every run warned that it fell back to an "ASCII-only"

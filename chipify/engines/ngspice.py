@@ -18,7 +18,12 @@ from pathlib import Path
 
 from chipify import settings
 from chipify.engines.abort import is_aborted
-from chipify.engines.base import BaseSimulator, describe_exit_code, extract_error_line
+from chipify.engines.base import (
+    BaseSimulator,
+    console_ngspice,
+    describe_exit_code,
+    extract_error_line,
+)
 from chipify.engines.xschem import run_xschem, safe_tb_file, safe_tb_path
 
 log = logging.getLogger("chipify.engines.ngspice")
@@ -145,8 +150,11 @@ class NgspiceSimulator(BaseSimulator):
         process = None
         try:
             with open(temp_log_file, "w") as log_file:
+                # A simulation has to run even where only the GUI build of
+                # ngspice is installed; the console build is preferred.
                 process = subprocess.Popen(
-                    ["ngspice", "-b", "-r", os.devnull, str(temp_spice_file)],
+                    [console_ngspice() or "ngspice", "-b", "-r", os.devnull,
+                     str(temp_spice_file)],
                     stdout=log_file,
                     stderr=subprocess.STDOUT,
                     text=True,

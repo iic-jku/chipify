@@ -42,8 +42,25 @@ Contract
 """
 from __future__ import annotations
 
+import os
+import shutil
 import signal
 from abc import ABC, abstractmethod
+
+#: Windows, where ngspice ships as a GUI program plus a console build.
+_WINDOWS = os.name == "nt"
+
+
+def console_ngspice() -> str | None:
+    """The console ngspice program, or None when only a GUI build is installed.
+
+    On Windows ``ngspice.exe`` is a GUI program that opens a window for every
+    invocation, even ``--version``; the distribution ships the console build
+    ``ngspice_con.exe`` next to it. Elsewhere ``ngspice`` is the console one.
+    """
+    if not _WINDOWS:
+        return "ngspice"
+    return "ngspice_con" if shutil.which("ngspice_con") else None
 
 
 def extract_error_line(log_text: str, *, fallback: bool = True) -> str:
