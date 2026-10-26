@@ -175,6 +175,54 @@ def classify_analysis_kind(xlabel: str, plotname: str = "") -> str:
     return "dc"
 
 
+def _analysis_bucket(vectors: dict, scale: str = "") -> "tuple[str, dict]":
+    """``(analysis kind, bucket)`` for one plot's ``{lower-case name: vector}``.
+
+    The X axis is ``time`` / ``frequency`` / ``freq`` when present, else the
+    plot's scale (*scale*, or the first vector), which is the sweep variable of
+    a DC sweep. Both readers below go through here, so they classify and label
+    a plot identically.
+    """
+    xlabel = next((c for c in ("time", "frequency", "freq") if c in vectors), "")
+    xlabel = xlabel or scale or next(iter(vectors), "")
+    bucket = dict(vectors)
+    if xlabel in bucket:
+        bucket["__x__"] = bucket[xlabel]
+    return classify_analysis_kind(xlabel), bucket
+
+
+def _read_with_pyopus(raw_file: str) -> "dict | None":
+    """Buckets from PyOPUS's reader, or None when it is not installed or fails.
+
+    PyOPUS (the ``vacask`` extra) exposes ``raw_read``, which returns one
+    ``(vectors, scale, scales, title, date, plotname)`` tuple per plot. chipify
+    used to import a ``RawFile`` class the installed PyOPUS does not have, so
+    this reader never ran and every run warned that only ASCII could be read.
+    """
+    try:
+        from pyopus.simulator.rawfile import raw_read  # type: ignore[import]
+    except ImportError:
+        return None   # optional: the built-in parser reads ASCII and binary too
+    try:
+        plots = raw_read(raw_file)
+    except Exception:  # noqa: BLE001 — the built-in parser is the fallback
+        log.warning("PyOPUS could not read %s; using the built-in parser.",
+                    raw_file, exc_info=True)
+        return None
+    if not plots:
+        log.warning("PyOPUS read no plot from %s; using the built-in parser.", raw_file)
+        return None
+
+    import numpy as np
+
+    buckets: dict[str, dict] = {}
+    for vectors, scale, *_rest in plots:
+        lowered = {str(name).lower(): np.asarray(vec) for name, vec in vectors.items()}
+        kind, bucket = _analysis_bucket(lowered, str(scale or "").lower())
+        buckets.setdefault(kind, {}).update(bucket)
+    return buckets or None
+
+
 def read_raw_file(raw_file: str) -> "dict | None":
     """Read a SPICE-format .raw → {analysis_kind: {signal_name_lower: np.ndarray}}.
 
@@ -182,48 +230,15 @@ def read_raw_file(raw_file: str) -> "dict | None":
     holding the X-axis vector (time / frequency / sweep parameter) so callers
     don't need to know the X variable's name.
 
-    Returns None if no analyses could be parsed at all. Empty dict on parse
-    failure with no error.
+    PyOPUS's reader is used when installed, else the built-in parser; both
+    read ASCII and binary files. Returns None if nothing could be parsed.
     """
-    # Preferred: PyOPUS rawfile reader (handles binary + ASCII)
-    try:
-        from pyopus.simulator.rawfile import RawFile  # type: ignore[import]
-    except ImportError as exc:
-        log.warning(
-            "pyopus.simulator.rawfile import failed: %s. "
-            "Vacask .raw files are typically binary (spectre format); install pyopus "
-            "to parse them. Falling back to ASCII-only parser.",
-            exc,
-        )
-    else:
-        try:
-            rf = RawFile(raw_file)
-            buckets: dict[str, dict] = {}
-            analyses = getattr(rf, "analyses", None) or [rf]
-            for an in analyses:
-                xvec = getattr(an, "xvec", None)
-                xlabel = getattr(an, "xlabel", "") or ""
-                plotname = (getattr(an, "name", "")
-                            or getattr(an, "plotname", "")
-                            or "")
-                kind = classify_analysis_kind(xlabel, plotname)
-                bucket = buckets.setdefault(kind, {})
-                if xvec is not None:
-                    bucket["__x__"] = xvec
-                    if xlabel:
-                        bucket[xlabel.lower()] = xvec
-                for sv in getattr(an, "yvec", []):
-                    bucket[sv.name.lower()] = sv.data
-            if buckets:
-                return buckets
-            log.warning("pyopus parsed %s but produced no signals.", raw_file)
-        except Exception:
-            log.warning("pyopus failed to parse %s; trying ASCII fallback.",
-                        raw_file, exc_info=True)
+    buckets = _read_with_pyopus(raw_file)
+    if buckets:
+        return buckets
 
-    # Fallback: built-in SPICE-format parser (handles binary + ASCII).
-    # The ASCII fallback can only see one analysis at a time; classify by
-    # looking for time / frequency in the column names.
+    # Built-in SPICE-format parser (ASCII and binary). It sees one plot per
+    # file, which is what VACASK writes.
     try:
         parsed = parse_ascii_raw(raw_file)
     except Exception:
@@ -235,17 +250,5 @@ def read_raw_file(raw_file: str) -> "dict | None":
                     raw_file)
         return None
 
-    # Detect X-axis column and classify
-    xlabel = ""
-    for cand in ("time", "frequency", "freq"):
-        if cand in parsed:
-            xlabel = cand
-            break
-    if not xlabel:
-        # First inserted column is the X axis for sweep analyses
-        xlabel = next(iter(parsed), "")
-    kind = classify_analysis_kind(xlabel)
-    bucket = dict(parsed)
-    if xlabel and xlabel in bucket:
-        bucket["__x__"] = bucket[xlabel]
+    kind, bucket = _analysis_bucket(parsed)
     return {kind: bucket}

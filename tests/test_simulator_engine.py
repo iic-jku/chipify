@@ -600,6 +600,82 @@ def test_parse_ascii_raw_complex_values(tmp_path) -> None:
     assert parsed["frequency"][1] == pytest.approx(10.0 + 0.0j)
 
 
+# ── PyOPUS raw reader adapter ────────────────────────────────────────────────
+
+def _install_fake_pyopus(monkeypatch, raw_read) -> None:
+    """Put a stand-in pyopus.simulator.rawfile exposing *raw_read* on sys.modules."""
+    import sys
+    import types
+
+    pkg, sim, mod = (types.ModuleType(n) for n in
+                     ("pyopus", "pyopus.simulator", "pyopus.simulator.rawfile"))
+    mod.raw_read = raw_read
+    sim.rawfile = mod
+    pkg.simulator = sim
+    for name, module in (("pyopus", pkg), ("pyopus.simulator", sim),
+                         ("pyopus.simulator.rawfile", mod)):
+        monkeypatch.setitem(sys.modules, name, module)
+
+
+def _transient_raw(path):
+    _write_ascii_raw(
+        path, flags="real", n_points=2,
+        varlines=["\t0\ttime\tnotype", "\t1\tvout\tnotype"],
+        values=" 0\t0.0\n\t1.0\n 1\t1e-6\n\t0.5\n",
+    )
+
+
+def test_pyopus_raw_read_is_used_and_matches_the_builtin_parser(tmp_path, monkeypatch) -> None:
+    """chipify imported a RawFile class the installed PyOPUS lacks, so its
+    reader never ran; it exposes raw_read() returning one tuple per plot."""
+    import numpy as np
+    from chipify.engines import rawfile
+
+    raw = tmp_path / "t.raw"
+    _transient_raw(raw)
+    builtin = rawfile.read_raw_file(str(raw))         # no pyopus on this box
+    calls = []
+
+    def raw_read(filename):
+        calls.append(filename)
+        vectors = {"time": np.array([0.0, 1e-6]), "VOUT": np.array([1.0, 0.5])}
+        return [(vectors, "time", {}, "title", "date", "Transient Analysis")]
+
+    _install_fake_pyopus(monkeypatch, raw_read)
+    via_pyopus = rawfile.read_raw_file(str(raw))
+
+    assert calls == [str(raw)]
+    assert via_pyopus.keys() == builtin.keys() == {"transient"}
+    assert via_pyopus["transient"].keys() == builtin["transient"].keys()
+    for name, vec in builtin["transient"].items():
+        assert list(via_pyopus["transient"][name]) == pytest.approx(list(vec))
+
+
+def test_a_failing_pyopus_read_falls_back_to_the_builtin_parser(tmp_path, monkeypatch) -> None:
+    from chipify.engines import rawfile
+
+    raw = tmp_path / "t.raw"
+    _transient_raw(raw)
+    _install_fake_pyopus(monkeypatch, lambda _f: None)   # PyOPUS's error result
+    buckets = rawfile.read_raw_file(str(raw))
+    assert list(buckets["transient"]["vout"]) == pytest.approx([1.0, 0.5])
+
+
+def test_missing_pyopus_is_not_a_warning(tmp_path, caplog) -> None:
+    """It is optional, and the built-in parser reads binary files too; the old
+    warning claimed an ASCII-only fallback on every run."""
+    import sys
+    from chipify.engines import rawfile
+
+    if "pyopus" in sys.modules:
+        pytest.skip("PyOPUS is installed here")
+    raw = tmp_path / "t.raw"
+    _transient_raw(raw)
+    with caplog.at_level("WARNING", logger="chipify.engines.rawfile"):
+        assert rawfile.read_raw_file(str(raw))["transient"]
+    assert not caplog.records
+
+
 # ── stage_files_to_ram freshness check ───────────────────────────────────────
 
 def test_staged_copy_is_stale(tmp_path) -> None:

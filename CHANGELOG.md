@@ -90,6 +90,13 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- The optional PyOPUS reader for VACASK `.raw` files never ran: chipify
+  imported a `RawFile` class that PyOPUS does not have (it exposes
+  `raw_read`), and every run warned that it fell back to an "ASCII-only"
+  parser. PyOPUS is now used when installed, and the built-in parser, which
+  reads ASCII and binary files alike, takes over silently when it is not.
+  Both return identical data for VACASK's OP, DC sweep, AC and transient
+  output.
 - A VACASK crash was recorded as the last five lines of its log, line breaks,
   caret line and file offsets included, without the exit code. Like ngspice's,
   it is now one line: how VACASK ended and the log's first error line, e.g.
