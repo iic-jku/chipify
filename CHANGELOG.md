@@ -9,6 +9,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Preparation for the initial public release.
 
 ### Added
+- `chipify-cli --preflight` checks a datasheet (or a `--batch`) without
+  simulating: case count, each testbench's engine, its netlist and the
+  rendering of the first case; exit code 1 when anything would fail.
+- `chipify-cli --case K` simulates one case only and keeps each testbench's
+  deck, simulator log and waveforms in `out/debug/<datasheet>/case_<id>/`,
+  without writing history; `--batch DIR --case 0` is a smoke test of every
+  datasheet.
 - Interrupted runs keep what they simulated. Every finished case is written
   to the run's journal (`history/run_<ts>.rows.jsonl`) as the sweep goes,
   instead of all results only after the last case, which made a host standby,

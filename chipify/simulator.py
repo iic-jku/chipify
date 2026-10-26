@@ -24,6 +24,7 @@ import time
 import logging
 import datetime
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from multiprocessing import active_children, current_process, get_context
 
@@ -259,6 +260,14 @@ def _log_hint(engine) -> str:
     return f" | {engine.name}: {line}" if line else ""
 
 
+def _engine_log(engine) -> str:
+    """The engine's whole log of its last run ('' if it has none)."""
+    try:
+        return engine.run_log_tail(_HINT_LOG_LINES) or ""
+    except Exception:  # noqa: BLE001 — a plugin engine's log is a bonus
+        return ""
+
+
 def _record_error(sample: dict, test, message: str) -> None:
     """Record *message* against *test* in *sample*, scoped to that testbench.
 
@@ -290,7 +299,8 @@ def _fail_test(sample: dict, test, message: str) -> None:
 
 def _simulate_single_case(params, tests, engine_for,
                           run_id: str = "",
-                          analysis_dirs: dict | None = None):
+                          analysis_dirs: dict | None = None,
+                          keep_dir: Path | None = None):
     """Simulate one parameter case across *tests*.
 
     *engine_for* is a ``test -> BaseSimulator`` selector, so each testbench can
@@ -298,6 +308,10 @@ def _simulate_single_case(params, tests, engine_for,
     (template rendering, engine crash, bad output) fails only that testbench's
     measurements — one bad testbench must never lose the whole case (or, worse,
     the whole worker batch).
+
+    *keep_dir* (``run_case``, the CLI's ``--case``) receives each testbench's
+    deck exactly as its engine got it and the engine's log: the scratch copies
+    are overwritten by the next case.
     """
     analysis_dirs = analysis_dirs or {}
     sample = params.copy()
@@ -357,6 +371,9 @@ def _simulate_single_case(params, tests, engine_for,
             _fail_test(sample, test,
                        f"{test.tb_path}: TEMPLATE_RENDER_ERROR: {exc}")
             continue
+        if keep_dir is not None:
+            (keep_dir / f"{tb_safe}{engine.netlist_ext}").write_text(
+                rendering, encoding="utf-8")
 
         # Built-in engines report failures via error_msg; a plugin engine may
         # raise instead — contain it the same way.
@@ -369,6 +386,10 @@ def _simulate_single_case(params, tests, engine_for,
             _fail_test(sample, test,
                        f"{test.tb_path}: [{engine.name}] ENGINE_ERROR: {exc}")
             continue
+        finally:
+            if keep_dir is not None:
+                (keep_dir / f"{tb_safe}.log").write_text(
+                    _engine_log(engine), encoding="utf-8")
 
         if error_msg:
             _fail_test(sample, test, f"{test.tb_path}: {error_msg}")
@@ -1058,3 +1079,110 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
             detector.close()
         clear_abort_flag()
         log.info("run_sim() exited.")
+
+
+# ── Before and instead of a sweep ─────────────────────────────────────────────
+
+@dataclass
+class PreflightReport:
+    """What :func:`preflight` found for one datasheet."""
+    cases: int = 0
+    #: Number of values of each swept parameter (the case count's factors).
+    sizes: dict = field(default_factory=dict)
+    #: ``{tb_path: {"engine": name, "error": "" or why it would fail}}``.
+    testbenches: dict = field(default_factory=dict)
+    #: Why the datasheet could not run at all ("" if it can).
+    plan_error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.plan_error and not any(
+            tb["error"] for tb in self.testbenches.values())
+
+
+def preflight(stim, simulator=None, templates_dir: str = "") -> PreflightReport:
+    """Check a datasheet the way a run would, without simulating anything.
+
+    Counts the cases, resolves each testbench's engine, generates every netlist
+    (missing schematics, symbols and include files surface here) and renders
+    the first case of each, so an undefined placeholder is found before a
+    sweep of thousands of cases fails on every one. Writes no history.
+    """
+    report = PreflightReport()
+    try:
+        _check_executable_plan(stim)
+    except ValueError as exc:
+        report.plan_error = str(exc)
+        return report
+    report.sizes = {name: len(values) for name, values in stim.params.items()}
+    param_sets = generate_cases(stim)
+    report.cases = len(param_sets)
+    cfg = app_config.load_config()
+    for test in stim.tests:
+        test.engine = resolve_engine_name(test, simulator, cfg)
+    clear_abort_flag()
+    generate_templates(stim, templates_dir=templates_dir)
+    first = param_sets[0] if param_sets else {}
+    for test in stim.tests:
+        error = getattr(test, "template_error", None) or ""
+        if not error and not getattr(test, "template_str", ""):
+            error = f"{test.tb_path}: no netlist template"
+        if not error:
+            kwargs = dict(first)
+            for an in getattr(test, "analyses", []) or []:
+                kwargs[an.jinja_var()] = f"<{an.kind} data>"
+            try:
+                render_netlist(test.template_str, kwargs)
+            except Exception as exc:  # noqa: BLE001
+                error = f"{test.tb_path}: TEMPLATE_RENDER_ERROR: {exc}"
+        report.testbenches[test.tb_path] = {"engine": test.engine, "error": error}
+    return report
+
+
+def run_case(stim, index: int, keep_dir, *, simulator=None,
+             templates_dir: str = "", overrides=None) -> dict:
+    """Simulate case *index* in this process; keep what it produced in *keep_dir*.
+
+    For debugging a testbench: each testbench's deck exactly as its simulator
+    got it, the simulator's log and the captured waveforms, which a sweep keeps
+    only in scratch files that the next case overwrites. Uses the settings a
+    run would (with *overrides*), and writes no history. Returns the case's
+    result row.
+    """
+    _check_executable_plan(stim)
+    param_sets = generate_cases(stim)
+    if not 0 <= index < len(param_sets):
+        raise ValueError(
+            f"case {index} does not exist: the datasheet has {len(param_sets)} "
+            f"case(s), 0 to {len(param_sets) - 1}.")
+    cfg = app_config.load_config()
+    cfg.update({k: v for k, v in (overrides or {}).items() if v is not None})
+    for test in stim.tests:
+        test.engine = resolve_engine_name(test, simulator, cfg)
+    clear_abort_flag()
+    generate_templates(stim, templates_dir=templates_dir)
+    _check_any_netlist(stim)
+    stage_files_to_ram([get_simulator_engine(n) for n in sorted({t.engine for t in stim.tests})])
+
+    # Replaced whole: files of an earlier debug run of this case would pass
+    # for this one's.
+    keep_dir = Path(keep_dir)
+    shutil.rmtree(keep_dir, ignore_errors=True)
+    keep_dir.mkdir(parents=True)
+    analysis_dirs = {}
+    for test in stim.tests:
+        for an in getattr(test, "analyses", []) or []:
+            analysis_dirs[an.kind] = str(keep_dir / an.kind)
+            Path(analysis_dirs[an.kind]).mkdir(exist_ok=True)
+
+    run_cfg = {key: cfg[key] for key in app_config.RUN_KEYS if key in cfg}
+    run_cfg["sim_timeout_sec"] = _resolve_sim_timeout(cfg)
+    # This process stands in for a worker, so it pins the run settings the
+    # same way, for this case only.
+    previous = app_config.set_run_overrides(run_cfg)
+    try:
+        return _simulate_single_case(param_sets[index], stim.tests, engine_selector(),
+                                     f"{index:06d}", analysis_dirs, keep_dir)
+    finally:
+        app_config.set_run_overrides(previous)
+        clear_abort_flag()

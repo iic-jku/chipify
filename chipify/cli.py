@@ -252,6 +252,104 @@ def _positive_float(text: str) -> float:
     return value
 
 
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _batch_files(batch_dir: Path, only: list[str] | None) -> tuple[list[Path], int]:
+    """The datasheets a ``--batch`` covers, in order, and how many DIR has.
+
+    Exits with a message when DIR has none or ``--only`` matches none.
+    """
+    from chipify import project_config
+
+    found = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
+    if not found:
+        print(f"[-] No *.yaml files found in: {batch_dir}")
+        sys.exit(1)
+    selected = _select_datasheets(found, only)
+    if not selected:
+        print(f"[-] --only {' '.join(only or [])} matched no datasheet in "
+              f"{batch_dir} (there are: {', '.join(p.stem for p in found)})")
+        sys.exit(1)
+    return selected, len(found)
+
+
+def _preflight_one(yaml_path: Path, *, simulator_override: str | None,
+                   templates_dir: str | None, json_out: bool) -> bool:
+    """``--preflight`` for one datasheet; True when it is ready to run."""
+    print(f"[*] Preflight: {yaml_path.name}")
+    summary: dict = {"yaml": yaml_path.name}
+    try:
+        stim = util.Stimuli(yaml_path)
+        report = simulator.preflight(stim, simulator=simulator_override,
+                                     templates_dir=templates_dir or "")
+    except Exception as exc:  # noqa: BLE001 — a datasheet that does not load is a finding
+        report = None
+        summary["error"] = " ".join(str(exc).split())[:300] or type(exc).__name__
+        print(f"    [-] {summary['error']}")
+    if report is not None:
+        summary.update(cases=report.cases, testbenches=report.testbenches)
+        if report.plan_error:
+            summary["error"] = report.plan_error
+            print(f"    [-] {report.plan_error}")
+        else:
+            sizes = " x ".join(f"{n} {name}" for name, n in report.sizes.items())
+            print(f"    {report.cases} case(s)" + (f" ({sizes})" if sizes else ""))
+            for tb_path, info in report.testbenches.items():
+                mark, what = ("[-]", info["error"]) if info["error"] else ("[+]", "ok")
+                print(f"    {mark} {tb_path} [{info['engine']}]: {what}")
+    summary["ok"] = report is not None and report.ok
+    if json_out:
+        print(json.dumps(summary))
+    return summary["ok"]
+
+
+def _run_case(yaml_path: Path, index: int, *, out_dir: Path,
+              simulator_override: str | None, templates_dir: str | None,
+              overrides: dict, json_out: bool) -> bool:
+    """``--case`` for one datasheet; True when the case ran without an error."""
+    from chipify import data_loader as _dl
+
+    keep = out_dir / "debug" / yaml_path.stem / f"case_{index:06d}"
+    try:
+        stim = util.Stimuli(yaml_path)
+        row = simulator.run_case(stim, index, keep, simulator=simulator_override,
+                                 templates_dir=templates_dir or "", overrides=overrides)
+    except Exception as exc:  # noqa: BLE001 — reported, like a failed run
+        error = " ".join(str(exc).split())[:300] or type(exc).__name__
+        print(f"[-] {yaml_path.name}, case {index}: {error}")
+        if json_out:
+            print(json.dumps({"yaml": yaml_path.name, "case": f"{index:06d}",
+                              "ok": False, "error": error}))
+        return False
+
+    params = {name: row.get(name) for name in stim.params}
+    print(f"[*] Case {index:06d} of {yaml_path.name}: "
+          + ", ".join(f"{name}={value}" for name, value in params.items()))
+    for test in stim.tests:
+        for val in test.value_lst:
+            value = row.get(val.name)
+            verdict = "PASS" if row.get(f"{val.name}_pass") else "FAIL"
+            shown = f"{value:.6g}" if isinstance(value, float) else value
+            print(f"    {val.name} = {shown}  {verdict}")
+        error = row.get(_dl.tb_error_col(test.tb_path), _dl.NO_ERROR)
+        print(f"    {test.tb_path}: {'ok' if error == _dl.NO_ERROR else error}")
+    print(f"[+] Decks, logs and waveforms in {keep}")
+    ok = row.get("sim_error", _dl.NO_ERROR) == _dl.NO_ERROR
+    if json_out:
+        print(json.dumps({"yaml": yaml_path.name, "case": f"{index:06d}", "ok": ok,
+                          "params": params, "debug_dir": str(keep),
+                          "sim_error": row.get("sim_error")}, default=str))
+    return ok
+
+
 def _select_datasheets(paths: list[Path], patterns: list[str] | None) -> list[Path]:
     """The datasheets whose file name or stem matches one of *patterns*.
 
@@ -366,6 +464,30 @@ def main():
     )
 
     parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "Check the datasheet(s) instead of simulating: case count, each\n"
+            "testbench's engine, its netlist (missing schematics, symbols,\n"
+            "include files) and the first case's rendering. Exit code 1 when\n"
+            "anything would fail. Nothing is written to history."
+        ),
+    )
+
+    parser.add_argument(
+        "--case",
+        metavar="K",
+        type=_non_negative_int,
+        default=None,
+        help=(
+            "Simulate only case K (0-based; the run id 00000K) and keep each\n"
+            "testbench's deck, simulator log and waveforms in\n"
+            "out/debug/<datasheet>/case_00000K/. Nothing is written to\n"
+            "history. With --batch: case K of every datasheet (a smoke test)."
+        ),
+    )
+
+    parser.add_argument(
         "--resume",
         action="store_true",
         help=(
@@ -451,6 +573,16 @@ def main():
     if args.resume and args.only:
         parser.error("--resume continues the batch with the datasheets it started with; "
                      "drop --only")
+    if args.preflight and args.case is not None:
+        parser.error("--preflight checks without simulating; --case simulates one case")
+    if args.preflight or args.case is not None:
+        clash = [flag for flag, on in (("--resume", args.resume),
+                                       ("--report-only", args.report_only),
+                                       ("--reports", args.reports),
+                                       ("--markdown", args.markdown)) if on]
+        if clash:
+            parser.error(f"{'--preflight' if args.preflight else '--case'} writes no "
+                         f"results, so {clash[0]} does not apply")
 
     # One output root for everything this invocation writes. The settings
     # overrides go to run_sim, which pins them for its workers.
@@ -466,9 +598,31 @@ def main():
     app_config.setup_logging(console_level=logging.WARNING,
                              log_path=out_root / "chipify.log" if args.out else None)
 
+    # ── Checking, or one case: nothing goes to history ────────────────────────
+    if args.preflight or args.case is not None:
+        if args.batch:
+            datasheets, _found = _batch_files(Path(args.batch), args.only)
+        else:
+            datasheets = [Path(settings.IN_DIR) / args.config]
+            if not datasheets[0].exists():
+                print(f"[-] Fatal Error: configuration file '{datasheets[0]}' not found!")
+                sys.exit(1)
+        ok = True
+        for yaml_path in datasheets:
+            if args.preflight:
+                ok &= _preflight_one(yaml_path, simulator_override=args.simulator,
+                                     templates_dir=args.templates_dir,
+                                     json_out=args.json)
+            else:
+                ok &= _run_case(yaml_path, args.case, out_dir=out_root,
+                                simulator_override=args.simulator,
+                                templates_dir=args.templates_dir,
+                                overrides=overrides, json_out=args.json)
+        sys.exit(0 if ok else 1)
+
     # ── Batch mode ────────────────────────────────────────────────────────────
     if args.batch:
-        from chipify import project_config, report_service, run_store
+        from chipify import report_service, run_store
 
         batch_dir = Path(args.batch)
         record = None
@@ -483,18 +637,9 @@ def main():
             print(f"[*] Resuming batch_{record.ts}: {finished} of {len(yaml_files)} "
                   f"datasheet(s) done")
         else:
-            found = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
-            if not found:
-                print(f"[-] No *.yaml files found in: {batch_dir}")
-                sys.exit(1)
-            yaml_files = _select_datasheets(found, args.only)
-            if not yaml_files:
-                print(f"[-] --only {' '.join(args.only)} matched no datasheet in "
-                      f"{batch_dir} (there are: {', '.join(p.stem for p in found)})")
-                sys.exit(1)
-
+            yaml_files, found = _batch_files(batch_dir, args.only)
             if args.only:
-                print(f"[*] Batch mode: {len(yaml_files)} of {len(found)} datasheet(s) "
+                print(f"[*] Batch mode: {len(yaml_files)} of {found} datasheet(s) "
                       f"selected in {batch_dir}")
             else:
                 print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")

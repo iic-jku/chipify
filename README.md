@@ -140,6 +140,24 @@ the combined report then covers the selection. `--cores` and `--timeout` replace
 `--out` replaces the output folder, `chipify.log` included. A run keeps the
 settings it started with: editing `settings.json` while it runs does not change it.
 
+### Before a long sweep
+
+```bash
+chipify-cli -c my_design.yaml --preflight      # check it; simulates nothing
+chipify-cli -c my_design.yaml --case 12        # simulate case 12 only
+chipify-cli --batch ./datasheets --case 0      # smoke test: case 0 of every datasheet
+```
+
+`--preflight` loads and validates each datasheet, counts its cases, resolves
+each testbench's engine, generates every netlist (missing schematics, symbols
+and include files show up here) and renders the first case, which catches a
+misspelled parameter in a testbench. Its exit code is 1 when anything would
+fail. `--case K` simulates the single case with run id K (`000012` for 12) with
+the run's settings and keeps, in `out/debug/<datasheet>/case_<id>/`, each
+testbench's deck exactly as the simulator got it, the simulator's log and the
+captured waveforms; during a sweep these only exist as scratch files that the
+next case overwrites. Neither writes anything to `history/`.
+
 ### Interrupted runs
 
 A run keeps every case it finishes, as it goes, in
