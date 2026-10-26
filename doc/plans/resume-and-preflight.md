@@ -1,7 +1,9 @@
 # Plan: run settings, run records, resumable runs and single-case debugging
 
-Status: in progress on branch `feature/resume-and-preflight`, based on
-`fix/silent-failures-and-robustness` at `be9ea0b`. Line numbers refer to that commit.
+Status: implemented on branch `feature/resume-and-preflight` (`9c77734` to `d75ef8d`), based
+on `fix/silent-failures-and-robustness` at `be9ea0b`. Line numbers refer to that commit.
+Where the implementation differs from this plan, the plan has been corrected; the user-facing
+behaviour is in README.md and CHANGELOG.md, the constraints in context.md.
 
 ## Goal
 
@@ -84,8 +86,9 @@ The run's on-disk record starts when the sweep starts, not when it ends.
 - Before the first case is dispatched, `run_sim` writes `history/run_<ts>.meta.json` with
   `"complete": false` and `planned_runs`, the datasheet snapshot, the templates archive and the
   run settings; then every finished worker batch is appended to `history/run_<ts>.rows.jsonl`
-  (one JSON object per row, flushed and fsynced). Waveform CSVs are already written per case
-  by the workers (`_persist_analyses`).
+  (one line per batch, `{"t": <unix time>, "rows": [...]}`, flushed and fsynced; the time lets
+  a resumed run's duration leave out the pause before the resume). Waveform CSVs are already
+  written per case by the workers (`_persist_analyses`).
 - `save_run` finishes the record: history CSV, `"complete": true`, latest CSV, pointers; then
   deletes the journal. A run that ends any other way leaves sidecar, snapshot, templates and
   journal behind. History listings only show `run_*.csv` (`data_loader.list_history_runs`,
