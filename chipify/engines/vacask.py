@@ -21,7 +21,7 @@ from pathlib import Path
 
 from chipify import app_config, settings
 from chipify.engines.abort import is_aborted
-from chipify.engines.base import BaseSimulator
+from chipify.engines.base import BaseSimulator, describe_exit_code, extract_error_line
 from chipify.engines.rawfile import read_raw_file as _read_raw_file
 from chipify.engines.rawfile import sanitise_key as _sanitise_key
 from chipify.engines.staging import staged_copy_is_stale
@@ -515,12 +515,15 @@ class VacaskSimulator(BaseSimulator):
                                            analysis_tab_paths,
                                            capture_errors=self._capture_errors)
 
-        except subprocess.CalledProcessError:
-            err_msg = "CRASH"
+        except subprocess.CalledProcessError as exc:
+            # One line, like ngspice's CRASH: how vacask ended plus the log's
+            # first error line. The last five log lines went into the result
+            # cell verbatim, carets and file offsets included.
+            detail = ""
             saved_log = ""
             if temp_log_file.exists():
-                with open(temp_log_file, "r") as lf:
-                    err_msg = "".join(lf.readlines()[-5:]).strip()
+                detail = extract_error_line(
+                    temp_log_file.read_text(encoding="utf-8", errors="replace"))
                 try:
                     out_dir = Path(settings.OUT_DIR)
                     out_dir.mkdir(parents=True, exist_ok=True)
@@ -534,7 +537,9 @@ class VacaskSimulator(BaseSimulator):
                     log.warning("Could not preserve vacask crash log: %s", copy_exc)
                     saved_log = ""
             suffix = f" (full log: {saved_log})" if saved_log else ""
-            return None, f"CRASH: {err_msg}{suffix}"
+            how = describe_exit_code(exc.returncode)
+            return None, (f"CRASH: vacask {how}" + (f": {detail}" if detail else "")
+                          + suffix)
 
         except Exception as exc:
             log.exception("VacaskSimulator.run unexpected error: %s", exc)

@@ -463,6 +463,25 @@ def test_ngspice_crash_names_the_cause(tmp_path, monkeypatch, log_text, code,
     assert "\n" not in error
 
 
+def test_vacask_crash_is_one_line_with_exit_code_and_error(tmp_path, monkeypatch) -> None:
+    """The last five log lines went into the cell verbatim (caret line and
+    file offsets included), with no exit code."""
+    vc_mod = pytest.importorskip("chipify.engines.vacask")
+    from chipify import settings
+
+    monkeypatch.setattr(settings, "FAST_TMP", str(tmp_path / "fast"))
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path / "out"))
+    (tmp_path / "fast").mkdir()
+    log_text = ("Parser syntax error, unexpected end of file, expecting newline\n"
+                "  15:5 (0x166) in /tmp/chipify/vc_1/sim.sim\n  endc\n      ^\n")
+    monkeypatch.setattr(vc_mod.subprocess, "Popen", _fake_ngspice(log_text, 1))
+    output, error = vc_mod.VacaskSimulator().run("analysis op1 op\nendc")
+    assert output is None
+    assert error.startswith("CRASH: vacask exited with code 1: Parser syntax error, "
+                            "unexpected end of file, expecting newline (full log: ")
+    assert "\n" not in error
+
+
 def test_describe_exit_code() -> None:
     import signal
     from chipify.engines.base import describe_exit_code

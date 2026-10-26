@@ -90,6 +90,11 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- A VACASK crash was recorded as the last five lines of its log, line breaks,
+  caret line and file offsets included, without the exit code. Like ngspice's,
+  it is now one line: how VACASK ended and the log's first error line, e.g.
+  `CRASH: vacask exited with code 1: Parser syntax error, unexpected newline`,
+  still followed by the path of the saved full log.
 - A native VACASK deck ending in the usual single newline crashed every run
   with "Parser syntax error, unexpected end of file, expecting newline":
   Jinja2 removed the template's final newline when rendering. Rendering now
