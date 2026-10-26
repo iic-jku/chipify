@@ -127,37 +127,12 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
         print(f"[-] Simulation aborted for {yaml_path}")
         return None
 
-    csv_out = out_dir / "simulation_results.csv"
-    df.to_csv(csv_out, index=False)
-    print(f"[+] Results saved to {csv_out}")
-
-    analysis_dirs = df.attrs.get("analysis_dirs", {}) or {}
-    simulator.write_analysis_pointers(analysis_dirs, out_dir)
-
-    from chipify import data_loader as _dl
-    from chipify import run_meta
-    s = _dl.result_summary(_dl.prepare_results(df))
-    meta_kwargs = dict(yaml_name=yaml_path.name,
-                       duration_s=duration_s, total_runs=s.total,
-                       valid_runs=s.valid, global_yield=round(s.yield_pct, 2),
-                       tran_dir=analysis_dirs.get("transient", ""),
-                       analysis_dirs=analysis_dirs)
-    # The latest CSV needs its own sidecar, as the GUI writes one. Without it,
-    # a sidecar left by an earlier GUI run described these results: another
-    # datasheet's identity and another run's waveform directories.
-    run_meta.write_meta(csv_out, **meta_kwargs)
-
-    # Save history copy + sidecar metadata
-    try:
-        import datetime
-        history_dir = out_dir / "history"
-        history_dir.mkdir(parents=True, exist_ok=True)
-        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        hist = history_dir / f"run_{ts}.csv"
-        df.to_csv(hist, index=False)
-        run_meta.write_meta(hist, **meta_kwargs)
-    except Exception as exc:
-        print(f"[!] Could not save history: {exc}")
+    from chipify import run_store
+    saved = run_store.save_run(df, stim, out_dir=out_dir, duration_s=duration_s,
+                               yaml_name=yaml_path.name)
+    print(f"[+] Results saved to {saved.latest_csv}")
+    if saved.history_error:
+        print(f"[!] Could not save history: {saved.history_error}")
 
     df = _with_scalar_equations(df, stim)
     print_summary(df, stim)

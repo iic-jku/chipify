@@ -34,6 +34,8 @@ from chipify import util
 from chipify import app_config
 from chipify import data_loader as _dl
 from chipify.templating import render_netlist
+# Saving a finished run lives in run_store now; re-exported for old callers.
+from chipify.run_store import write_analysis_pointers  # noqa: F401
 
 # ── Engine API (re-exported for backward compatibility) ──────────────────────
 from chipify.engines import (  # noqa: F401
@@ -666,32 +668,6 @@ def _assemble_result_df(rows: list, analysis_dirs: dict) -> pd.DataFrame:
         if analysis_dirs.get("transient"):
             df.attrs["tran_dir"] = analysis_dirs["transient"]
     return df
-
-
-def write_analysis_pointers(analysis_dirs: dict, out_dir=None) -> None:
-    """Record each kind's latest data directory in ``analysis_data/<kind>/.latest``.
-
-    The GUI's analysis-dir resolution reads these pointer files after a
-    restart; the legacy ``tran_data/.latest`` pointer is also kept for
-    transient so older consumers keep working.
-
-    *out_dir* is the run's output root (default ``settings.OUT_DIR``). Batch
-    mode passes each datasheet's own folder, so a pointer only ever names a
-    directory of the datasheet it sits next to.
-    """
-    out_dir = Path(out_dir or settings.OUT_DIR)
-    for kind, d in (analysis_dirs or {}).items():
-        if not d:
-            continue
-        targets = [out_dir / "analysis_data" / kind / ".latest"]
-        if kind == "transient":
-            targets.append(out_dir / "tran_data" / ".latest")
-        for ptr in targets:
-            try:
-                ptr.parent.mkdir(parents=True, exist_ok=True)
-                ptr.write_text(str(d), encoding="utf-8")
-            except Exception as exc:
-                log.warning("Could not write %s pointer %s: %s", kind, ptr, exc)
 
 
 def _create_analysis_dirs(stim, out_dir) -> dict[str, str]:

@@ -1376,6 +1376,30 @@ def _hover_at(canvas, ax, x, y):
     )
 
 
+def test_gui_runs_are_saved_like_cli_runs(qt_app, tmp_path, monkeypatch):
+    """One save path for both: the GUI worker writes what the CLI writes."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from chipify import run_meta, settings
+    from chipify.gui_qt.workers.sim_worker import SimWorker
+
+    monkeypatch.setattr(settings, "OUT_DIR", tmp_path)
+    df = pd.DataFrame({"run_id": ["000000"], "sim_error": ["None"],
+                       "tb__error": ["None"], "gain": [10.0], "gain_pass": [True],
+                       "tb_overall_pass": [True]})
+    stim = SimpleNamespace(tests=[
+        SimpleNamespace(tb_path="tb", engine="ngspice", template_str="* tb\n")])
+    SimWorker(str(tmp_path / "amp.yaml"), live_plotting=False)._persist(df, stim, 3.0)
+
+    hist = next((tmp_path / "history").glob("run_*.csv"))
+    meta = run_meta.read_meta(hist)
+    assert (meta["yaml"], meta["duration_s"], meta["global_yield"]) == ("amp.yaml", 3.0, 100.0)
+    assert (Path(meta["templates_dir"]) / "tb.spice").is_file()
+    latest = run_meta.read_meta(tmp_path / "simulation_results.csv")
+    assert latest["templates_dir"] == meta["templates_dir"]
+
+
 def test_curve_hover_survives_a_draw_queued_when_the_pointer_arrives(qt_app):
     """Qt's blit() repaints synchronously and its paint event first runs a
     queued full draw; the hover reset itself for that draw, so the tooltip

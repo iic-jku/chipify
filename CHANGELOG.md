@@ -73,6 +73,10 @@ Preparation for the initial public release.
   via `settings.json`, falling back to the default structure when unset.
 
 ### Changed
+- The CLI and the GUI save a finished run the same way (`run_store.save_run`).
+  CLI runs now keep the netlist templates they simulated in
+  `history/run_<ts>_templates/`, as GUI runs already did, so a sample of a CLI
+  run can be exported as a netlist and the run repeated with `--templates-dir`.
 - In `--batch` mode a datasheet's waveforms are written to
   `out/<datasheet>/analysis_data/`, next to its results, instead of the shared
   `out/analysis_data/`. Single-datasheet runs and the GUI are unchanged.

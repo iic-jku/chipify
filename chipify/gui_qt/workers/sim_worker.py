@@ -17,7 +17,6 @@ abort flag via :func:`chipify.simulator.abort_simulation`.
 """
 from __future__ import annotations
 
-import datetime
 import logging
 import threading
 import time
@@ -26,8 +25,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot
 
-from chipify import run_meta, settings, simulator, util
-from chipify.uikit.services import netlist_export
+from chipify import run_store, settings, simulator, util
 
 log = logging.getLogger("chipify.gui_qt.sim_worker")
 
@@ -110,47 +108,9 @@ class SimWorker(QObject):
     # ── Persistence (off the GUI thread) ──────────────────────────────────────
 
     def _persist(self, df, stim, elapsed: float) -> None:
-        """Write the live CSV, archive a history copy, and emit meta sidecars."""
-        csv_out = Path(settings.OUT_DIR) / "simulation_results.csv"
-        df.to_csv(csv_out, index=False)
-
-        analysis_dirs = df.attrs.get("analysis_dirs", {}) or {}
-        simulator.write_analysis_pointers(analysis_dirs)
-
-        try:
-            history_dir = Path(settings.OUT_DIR) / "history"
-            history_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            history_file = history_dir / f"run_{timestamp}.csv"
-            df.to_csv(history_file, index=False)
-
-            total = len(df)
-            valid = (
-                int((df.get("sim_error", "None") == "None").sum())
-                if "sim_error" in df.columns else total
-            )
-            gpass = int(df["global_pass"].sum()) if "global_pass" in df.columns else None
-            gyield = (gpass / total * 100) if (gpass is not None and total > 0) else None
-
-            try:
-                templates_dir = netlist_export.persist_templates(
-                    stim, history_dir / f"run_{timestamp}_templates",
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Could not persist netlist templates: %s", exc)
-                templates_dir = ""
-
-            meta_kwargs = dict(
-                yaml_name=Path(self._yaml_path).name,
-                duration_s=elapsed,
-                total_runs=total,
-                valid_runs=valid,
-                global_yield=gyield,
-                tran_dir=df.attrs.get("tran_dir", ""),
-                analysis_dirs=analysis_dirs,
-                templates_dir=templates_dir,
-            )
-            run_meta.write_meta(history_file, **meta_kwargs)
-            run_meta.write_meta(csv_out, **meta_kwargs)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Could not save history: %s", exc)
+        """Write the latest CSV, the history copy, templates and sidecars."""
+        saved = run_store.save_run(df, stim, out_dir=settings.OUT_DIR,
+                                   duration_s=elapsed,
+                                   yaml_name=Path(self._yaml_path).name)
+        if saved.history_error:
+            log.warning("Could not save history: %s", saved.history_error)

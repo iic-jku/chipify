@@ -120,6 +120,28 @@ def test_each_datasheet_keeps_its_own_waveforms(project, monkeypatch, capsys):
     assert not (project["out"] / "analysis_data").exists()
 
 
+def test_cli_runs_archive_their_netlist_templates(project, monkeypatch, capsys):
+    """Only GUI runs kept the templates they simulated, so a CLI history run
+    could not export a sample's netlist or be re-run with --templates-dir."""
+    from chipify import run_meta, simulator
+
+    def run_sim_with_templates(stim, *, out_dir=None, **_kw):
+        for test in stim.tests:
+            test.engine = "ngspice"
+            test.template_str = f"* {test.tb_path} {{{{ temp }}}}\n"
+        df = _results()
+        df.attrs["analysis_dirs"] = simulator._create_analysis_dirs(stim, out_dir)
+        return df
+
+    monkeypatch.setattr(simulator, "run_sim", run_sim_with_templates)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert code == 0
+    for name in ("alpha", "beta"):
+        hist = next((project["out"] / name / "history").glob("run_*.csv"))
+        templates = Path(run_meta.read_meta(hist)["templates_dir"])
+        assert (templates / "tb.spice").read_text(encoding="utf-8") == "* tb {{ temp }}\n"
+
+
 def test_latest_results_get_their_own_sidecar(project, monkeypatch, capsys):
     """The CLI rewrote simulation_results.csv but left the sidecar of an
     earlier GUI run next to it, so the new results resolved to that run's
