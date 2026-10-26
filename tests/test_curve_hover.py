@@ -599,6 +599,71 @@ def test_the_highlight_survives_a_rasterized_overlay():
     assert mgr._highlight is not None
     assert _text(mgr).startswith("Run #000003")
 
+
+class _QtLikeCanvas(FigureCanvasAgg):
+    """Agg with Qt's repaint order: ``blit()`` paints synchronously, and the
+    paint first runs a draw that ``draw_idle()`` queued (backend_qt's
+    ``paintEvent`` calls ``_draw_idle`` before copying the buffer)."""
+
+    def __init__(self, figure):
+        super().__init__(figure)
+        self.draw_queued = False
+
+    def draw_idle(self, *args, **kwargs):
+        self.draw_queued = True
+
+    def blit(self, bbox=None):
+        if self.draw_queued:
+            self.draw_queued = False
+            self.draw()
+
+
+def _qt_like_hover():
+    fig = Figure(figsize=(6, 4))
+    canvas = _QtLikeCanvas(fig)
+    ax = fig.add_subplot(111)
+    x = np.linspace(0, 1, 200)
+    line, = ax.plot(x, np.zeros_like(x), linewidth=0.8)
+    mgr = _manager(canvas, fig,
+                   ch.CurveHoverState({line: ("000000", "v(out)")}, _results([0]), None))
+    return fig, canvas, ax, line, mgr
+
+
+def test_a_draw_queued_when_the_pointer_arrives_keeps_the_tooltip():
+    """Qt's blit() ran the queued draw inside the hover's own repaint, and
+    _on_draw reset the hover for it: the tooltip and the highlight vanished
+    until the next mouse move."""
+    fig, canvas, ax, line, mgr = _qt_like_hover()
+    _move(canvas, ax, 0.5, 0.0)
+    canvas.draw_idle()                        # e.g. queued by the end of a pan
+    _move(canvas, ax, 0.6, 0.0)
+
+    assert _text(mgr) is not None and line.get_linewidth() > 0.8
+    assert not canvas.draw_queued             # no second redraw left behind
+    # The background it re-saved is a clean frame, not one with the thick curve.
+    bg = mgr._bg
+    mgr.hide()
+    canvas.draw()
+    clean = bytes(canvas.buffer_rgba())
+    canvas.restore_region(bg)
+    assert bytes(canvas.buffer_rgba()) == clean
+
+
+@pytest.mark.parametrize("leave", ["off the curve", "out of the figure"])
+def test_a_draw_queued_while_hiding_does_not_bring_the_tooltip_back(leave):
+    fig, canvas, ax, line, mgr = _qt_like_hover()
+    _move(canvas, ax, 0.5, 0.0)
+    canvas.draw_idle()
+    if leave == "off the curve":
+        _move(canvas, ax, 0.5, 0.9)
+    else:
+        canvas.callbacks.process(
+            "figure_leave_event", MouseEvent("figure_leave_event", canvas, 0, 0))
+
+    assert _text(mgr) is None and line.get_linewidth() == 0.8
+    assert mgr._bg is not None and not canvas.draw_queued
+
+
 # ── The plotters' line_map ────────────────────────────────────────────────────
 
 def test_the_overlay_plotters_map_every_curve_they_draw(tmp_path):

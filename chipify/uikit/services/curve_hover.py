@@ -381,6 +381,9 @@ class CurveHoverManager:
         self._can_blit = all(hasattr(canvas, name) for name in
                              ("copy_from_bbox", "restore_region", "blit"))
         self._bubble.animated = self._can_blit
+        self._blitting = False    # inside our own canvas.blit()
+        self._redrawn = False     # ...and a full draw ran during it
+        self._replaying = False
 
     def connect(self) -> None:
         self._canvas.mpl_connect("motion_notify_event", self._on_motion)
@@ -466,6 +469,8 @@ class CurveHoverManager:
         source = getattr(event, "canvas", self._canvas)
         if source is not self._canvas or getattr(source, "is_saving", bool)():
             return
+        if self._blitting:
+            self._redrawn = True
         if not self._can_blit:
             self._bg = None
             return
@@ -482,9 +487,11 @@ class CurveHoverManager:
             return
         if restored:
             # …so the frame just saved still shows the thick curve. Drop it and
-            # schedule the repaint that puts the curve back to normal width.
+            # schedule the repaint that puts the curve back to normal width,
+            # unless this draw ran inside our blit: _repaint handles that one.
             self._bg = None
-            self._canvas.draw_idle()
+            if not self._blitting:
+                self._canvas.draw_idle()
 
     def _fall_back(self) -> None:
         """Give up on blitting for good and repaint whole figures instead.
@@ -509,7 +516,9 @@ class CurveHoverManager:
             log.debug("Could not draw a blit background.", exc_info=True)
             self._fall_back()
 
-    def _repaint(self) -> None:
+    def _repaint(self, motion=None) -> None:
+        """Put the highlight and the bubble on screen; *motion* is the event
+        that showed them, if any."""
         annot = self._bubble.annot
         if self._can_blit and self._bg is not None:
             try:
@@ -521,7 +530,13 @@ class CurveHoverManager:
                     line.axes.draw_artist(line)
                 if annot is not None and annot.get_visible() and annot.axes is not None:
                     annot.axes.draw_artist(annot)
-                self._canvas.blit(self._fig.bbox)
+                self._blitting, self._redrawn = True, False
+                try:
+                    self._canvas.blit(self._fig.bbox)
+                finally:
+                    self._blitting = False
+                if self._redrawn:
+                    self._redrawn_while_blitting(motion)
                 return
             except Exception:  # noqa: BLE001
                 log.debug("Blitting the hover tooltip failed.", exc_info=True)
@@ -529,6 +544,26 @@ class CurveHoverManager:
         if annot is not None:
             annot.set_animated(False)
         self._canvas.draw_idle()
+
+    def _redrawn_while_blitting(self, motion) -> None:
+        """Recover from a full draw that ran inside our own ``blit()``.
+
+        Qt's ``blit()`` repaints synchronously, and the paint event first runs
+        any pending full draw (queued by a resize, the end of a pan or a
+        redraw). ``_on_draw`` reset the hover for it as for any draw, so the
+        tooltip just shown vanished until the next mouse move. Handling the
+        motion that showed it once more puts it back on a fresh background.
+        """
+        if motion is not None and not self._replaying:
+            self._replaying = True
+            try:
+                self._on_motion(motion)
+            finally:
+                self._replaying = False
+        if self._bg is None:
+            # That draw caught the curve highlighted, and nothing has put a
+            # clean frame on screen since.
+            self._canvas.draw_idle()
 
     def _interaction_locked(self, event) -> bool:
         """True while a drag or a toolbar tool (pan / zoom rectangle) owns the mouse."""
@@ -601,4 +636,4 @@ class CurveHoverManager:
         self._apply_highlight(line)
         self._bubble.show(ax, (x_value, y_value), text, event)
         self._last = token
-        self._repaint()
+        self._repaint(event)

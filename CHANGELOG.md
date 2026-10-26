@@ -90,6 +90,14 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- The waveform hover lost its tooltip if a full redraw was still queued when
+  the pointer reached a curve: Qt ran that redraw inside the hover's own
+  repaint, the hover reset itself for it, and the tooltip and the highlight
+  stayed away until the next mouse move. The hover now shows them again on
+  the fresh frame, without an extra redraw. (Reproduced on an offscreen Qt
+  canvas with the redraw queued on purpose; no chipify code path that queues
+  one at that moment was found, and a visible failure in the GUI was not
+  reproduced.)
 - On Windows, where `ngspice.exe` is a GUI program, chipify opened an ngspice
   window for every simulation and again for every run sidecar (to read the
   version). It now starts the console build `ngspice_con.exe` that ships next

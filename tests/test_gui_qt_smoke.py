@@ -1376,6 +1376,40 @@ def _hover_at(canvas, ax, x, y):
     )
 
 
+def test_curve_hover_survives_a_draw_queued_when_the_pointer_arrives(qt_app):
+    """Qt's blit() repaints synchronously and its paint event first runs a
+    queued full draw; the hover reset itself for that draw, so the tooltip
+    vanished until the next mouse move. A real, shown Qt canvas."""
+    import numpy as np
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+    from matplotlib.figure import Figure
+
+    from chipify.uikit.services.curve_hover import CurveHoverManager, CurveHoverState
+
+    fig = Figure(figsize=(6, 4))
+    canvas = FigureCanvasQTAgg(fig)
+    ax = fig.add_subplot(111)
+    x = np.linspace(0.0, 1.0, 200)
+    line, = ax.plot(x, np.zeros_like(x), linewidth=0.8)
+    state = CurveHoverState({line: ("000000", "v(out)")}, pd.DataFrame({"run_id": [0]}))
+    hover = CurveHoverManager(canvas, fig, get_state=lambda: state)
+    hover.connect()
+    canvas.resize(600, 400)
+    canvas.show()
+    try:
+        qt_app.processEvents()
+        _hover_at(canvas, ax, 0.5, 0.0)
+        canvas.draw_idle()                        # e.g. queued by the end of a pan
+        _hover_at(canvas, ax, 0.6, 0.0)
+        qt_app.processEvents()
+
+        annot = hover._bubble.annot
+        assert annot is not None and annot.get_visible()
+        assert line.get_linewidth() > 0.8
+    finally:
+        canvas.close()
+
+
 def test_plots_tab_hover_names_the_run_under_the_cursor(window, tmp_path):
     """End to end: real CSVs, the tab's own redraw, a real motion event."""
     df, stim = _waveform_results(tmp_path)
