@@ -88,7 +88,8 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
                 progress_stream: bool = False,
                 out_dir: str | os.PathLike[str] | None = None,
                 reports: bool = False,
-                overrides: dict | None = None):
+                overrides: dict | None = None,
+                resume: bool = False):
     """Run simulation for one yaml file.
 
     Returns a ``report_service.BatchEntry`` (results, datasheet, summary dict,
@@ -101,15 +102,32 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
         results and waveforms.
     overrides:
         Settings for this run over settings.json (``--cores``, ``--timeout``).
+    resume:
+        Continue the datasheet's interrupted run (``--resume``).
     """
     import time
-    from chipify import report_service
+    from chipify import report_service, run_store
 
     yaml_path = Path(yaml_path)
     print(f"[*] Loading configuration: {yaml_path.name}")
     out_dir = Path(out_dir) if out_dir else Path(settings.OUT_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     stim = util.Stimuli(yaml_path)
+    unfinished = None
+    earlier_s = 0.0
+    if resume:
+        unfinished = run_store.find_unfinished(out_dir, yaml_path.name)
+        if unfinished is None:
+            print(f"[-] Nothing to resume for {yaml_path.name}: its newest run in "
+                  f"{out_dir / 'history'} finished, or it has none.")
+            return None
+        problem = unfinished.problem_with(stim)
+        if problem:
+            print(f"[-] Cannot resume {yaml_path.name}: {problem}.")
+            return None
+        print(f"[*] Resuming run_{unfinished.ts}: {len(unfinished.done_rows())} of "
+              f"{unfinished.planned_runs} case(s) done")
+        earlier_s = unfinished.elapsed_s()
     t0 = time.perf_counter()
     progress_cb = _make_progress_stream_cb() if progress_stream else None
     try:
@@ -120,6 +138,7 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
             progress_callback=progress_cb,
             out_dir=out_dir,
             overrides=overrides,
+            resume=unfinished,
         )
     except Exception as exc:
         # run_sim raises on unexpected failures and returns None only on abort,
@@ -127,11 +146,13 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
         from chipify import app_config
         print(f"[-] Simulation failed for {yaml_path}: {exc}")
         print(f"    See {app_config.LOG_PATH} for the traceback.")
+        _report_unfinished(out_dir, yaml_path)
         return None
-    duration_s = time.perf_counter() - t0
+    duration_s = time.perf_counter() - t0 + earlier_s
 
     if df is None:
         print(f"[-] Simulation aborted for {yaml_path}")
+        _report_unfinished(out_dir, yaml_path)
         return None
 
     from chipify import run_store
@@ -153,6 +174,17 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
     if json_out:
         print(json.dumps(summary))
     return entry
+
+
+def _report_unfinished(out_dir, yaml_path) -> None:
+    """After a run ended early: what it kept, and how to continue it."""
+    from chipify import run_store
+
+    run = run_store.find_unfinished(out_dir, Path(yaml_path).name)
+    if run is None:
+        return
+    print(f"    {len(run.done_rows())} of {run.planned_runs} case(s) finished and are "
+          f"kept in {run.journal}; add --resume to the same command to continue.")
 
 
 def _load_finished_run(yaml_path: str | os.PathLike[str], *,
@@ -326,6 +358,17 @@ def main():
     )
 
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Continue the datasheet's interrupted run (aborted, crashed or\n"
+            "killed) instead of starting a new one: only the cases it has no\n"
+            "result for are simulated, with the run's own netlists and\n"
+            "settings. --cores and --timeout still apply."
+        ),
+    )
+
+    parser.add_argument(
         "--cores",
         metavar="N",
         type=_positive_int,
@@ -393,6 +436,12 @@ def main():
     args = parser.parse_args()
     if args.only and not args.batch:
         parser.error("--only selects datasheets of a --batch run")
+    if args.resume and args.report_only:
+        parser.error("--resume simulates; --report-only does not")
+    if args.resume and args.templates_dir:
+        parser.error("--resume uses the netlists the run started with, not --templates-dir")
+    if args.resume and args.batch:
+        parser.error("--resume continues one datasheet's run: use it with -c, not --batch")
 
     # One output root for everything this invocation writes. The settings
     # overrides go to run_sim, which pins them for its workers.
@@ -508,7 +557,7 @@ def main():
                             templates_dir=args.templates_dir,
                             progress_stream=args.progress_stream,
                             out_dir=out_root, reports=args.reports,
-                            overrides=overrides)
+                            overrides=overrides, resume=args.resume)
     if entry is None:
         sys.exit(1)
 

@@ -27,6 +27,9 @@ Schema (v1)
   "datasheet_snapshot": "history/run_20260506_150000.datasheet.yaml",
   "settings":       {"sim_timeout_sec": 600.0, "num_cores": 8, ...},
   "engines":        {"tb_amp": "ngspice"},
+  "complete":       true,          // false while the run is in progress
+  "planned_runs":   500,
+  "resumed":        [],            // when an interrupted run was continued
   "notes":          "",
   "tags":           []
 }
@@ -168,6 +171,9 @@ def write_meta(
     datasheet_snapshot: str = "",
     settings: dict | None = None,
     engines: dict | None = None,
+    complete: bool = True,
+    planned_runs: int | None = None,
+    resumed: list | None = None,
 ) -> str:
     """
     Write a sidecar .meta.json next to *csv_path*.
@@ -180,6 +186,10 @@ def write_meta(
     ``datasheet_snapshot``, the copy of the datasheet the run parsed.
     ``templates_dir`` holds this run's persisted Jinja2 netlist templates (one
     ``<safe_tb>.spice|.sim`` per testbench).
+
+    ``complete`` is False while the run is still going (``run_store``: its
+    record starts with the sweep, see :func:`is_complete`); ``planned_runs`` is
+    its number of cases, ``resumed`` the times it was continued.
 
     Returns the path written, or "" on failure.
     """
@@ -212,6 +222,9 @@ def write_meta(
         "datasheet_snapshot": _relative_to_root(str(datasheet_snapshot or ""), root),
         "settings": dict(settings or {}),
         "engines": dict(engines or {}),
+        "complete": bool(complete),
+        "planned_runs": planned_runs,
+        "resumed": list(resumed or []),
         "notes": "",
         "tags": [],
     }
@@ -265,6 +278,15 @@ def read_meta(csv_path: str | os.PathLike[str]) -> dict:
     except Exception as exc:
         log.warning("Could not read run metadata %s: %s", path, exc)
         return {}
+
+
+def is_complete(meta: dict) -> bool:
+    """False only for the record of a run that has not finished (yet).
+
+    Sidecars older than run records have no ``complete`` key: they were only
+    ever written for finished runs.
+    """
+    return meta.get("complete", True) is not False
 
 
 def analysis_dirs_for(csv_path: str | os.PathLike[str],

@@ -417,6 +417,98 @@ def test_out_applies_to_a_single_run(project, monkeypatch, capsys):
     assert (elsewhere / "simulation_results.csv").is_file()
 
 
+# ── Interrupted runs ──────────────────────────────────────────────────────────
+
+def _interrupted(project, name="alpha", done=2):
+    """The record and journal an interrupted run of *name* leaves behind."""
+    from chipify import run_store, util
+
+    stim = util.Stimuli(project["batch"] / f"{name}.yaml")
+    ts = run_store.new_run_ts(project["out"])
+    journal = run_store.begin_run(stim, project["out"], ts, planned_runs=3,
+                                  analysis_dirs={}, run_settings={"sim_timeout_sec": 60.0},
+                                  engines={"tb": "ngspice"})
+    journal.append(_results().to_dict("records")[:done])
+    journal.close()
+    return ts
+
+
+def _single(project, monkeypatch):
+    from chipify import settings
+    monkeypatch.setattr(settings, "IN_DIR", project["batch"])
+
+
+def test_an_aborted_run_says_what_it_kept_and_how_to_continue(project, monkeypatch, capsys):
+    from chipify import simulator
+
+    _single(project, monkeypatch)
+
+    def aborted(stim, *, out_dir=None, **_kw):
+        _interrupted(project)
+        return None
+
+    monkeypatch.setattr(simulator, "run_sim", aborted)
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "-c", "alpha.yaml"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    out = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "2 of 3 case(s) finished" in out and "--resume" in out
+
+
+def test_resume_continues_the_interrupted_run(project, monkeypatch, capsys):
+    from chipify import run_meta, simulator
+
+    _single(project, monkeypatch)
+    ts = _interrupted(project)
+    seen = []
+
+    def resumed(stim, *, out_dir=None, resume=None, **_kw):
+        seen.append((resume.ts, sorted(resume.done_rows())))
+        df = _results()
+        df.attrs["run_ts"] = resume.ts
+        return df
+
+    monkeypatch.setattr(simulator, "run_sim", resumed)
+    code, _ = _main(monkeypatch, capsys, "-c", "alpha.yaml", "--resume")
+    assert code == 0
+    assert seen == [(ts, ["000000", "000001"])]
+    hist = project["out"] / "history" / f"run_{ts}.csv"
+    assert hist.is_file() and run_meta.read_meta(hist)["complete"] is True
+    assert not hist.with_suffix(".rows.jsonl").exists()
+
+
+def test_resume_without_an_interrupted_run_says_so(project, monkeypatch, capsys):
+    _single(project, monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "-c", "alpha.yaml", "--resume"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert "Nothing to resume for alpha.yaml" in capsys.readouterr().out
+    assert project["calls"] == []
+
+
+def test_resume_refuses_an_edited_datasheet(project, monkeypatch, capsys):
+    _single(project, monkeypatch)
+    _interrupted(project)
+    alpha = project["batch"] / "alpha.yaml"
+    alpha.write_text(alpha.read_text(encoding="utf-8").replace("max: 11", "max: 12"),
+                     encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "-c", "alpha.yaml", "--resume"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert "the datasheet changed" in capsys.readouterr().out
+    assert project["calls"] == []
+
+
+@pytest.mark.parametrize("argv", [
+    ("--report-only",), ("--templates-dir", "x"), ("--batch", "datasheets")])
+def test_resume_conflicts(project, monkeypatch, capsys, argv):
+    code, _ = _main(monkeypatch, capsys, "-c", "alpha.yaml", "--resume", *argv)
+    assert code == 2
+
+
 def test_order_datasheets_accepts_names_and_stems(tmp_path, caplog):
     from chipify import project_config
 

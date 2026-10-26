@@ -140,6 +140,23 @@ the combined report then covers the selection. `--cores` and `--timeout` replace
 `--out` replaces the output folder, `chipify.log` included. A run keeps the
 settings it started with: editing `settings.json` while it runs does not change it.
 
+### Interrupted runs
+
+A run keeps every case it finishes, as it goes, in
+`history/run_<ts>.rows.jsonl`. If it is stopped, crashes, is killed (out of
+memory, a container stop, the host going to standby), the finished cases stay
+there, and the same command with `--resume` simulates only the rest:
+
+```bash
+chipify-cli -c my_design.yaml --resume
+```
+
+The run continues with its own netlists (archived when it started) and its own
+settings; `--cores` and `--timeout` given with `--resume` still apply, for
+example a longer timeout for the cases that timed out. It is refused if the
+datasheet changed since the run started, and only the datasheet's newest run
+can be continued. A run stopped in the GUI can be continued this way too.
+
 A datasheet's optional one-line `description:` (top-level key, also editable in
 the GUI's Datasheet Editor) appears on its report cover and on the summary
 page. An optional `project.yaml` in the project root sets the batch report's

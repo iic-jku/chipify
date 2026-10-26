@@ -34,6 +34,7 @@ from chipify import util
 from chipify import app_config
 from chipify import data_loader as _dl
 from chipify.templating import render_netlist
+from chipify import run_store
 # Saving a finished run lives in run_store now; re-exported for old callers.
 from chipify.run_store import write_analysis_pointers  # noqa: F401
 
@@ -678,15 +679,17 @@ def _assemble_result_df(rows: list, analysis_dirs: dict) -> pd.DataFrame:
     return df
 
 
-def _create_analysis_dirs(stim, out_dir) -> dict[str, str]:
+def _create_analysis_dirs(stim, out_dir, ts: str | None = None) -> dict[str, str]:
     """Create ``<out_dir>/analysis_data/<kind>/<timestamp>/`` per analysis kind.
 
     Only kinds actually used by at least one test get a directory. Run ids
     restart at ``000000`` for every run, so the directory is what keeps two
     runs' ``run_<id>__<tb>.csv`` files apart — which is why it lives under the
     run's own output root rather than one folder shared by every datasheet.
+    *ts* is the run's timestamp (``run_store.new_run_ts``), which also names
+    its history files.
     """
-    sim_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    sim_timestamp = ts or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     analysis_dirs: dict[str, str] = {}
     for kind in ("transient", "dc", "ac"):
         if any(
@@ -746,7 +749,7 @@ def _check_any_netlist(stim) -> None:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
-            templates_dir: str = "", out_dir=None, overrides=None):
+            templates_dir: str = "", out_dir=None, overrides=None, resume=None):
     """
     Main simulation entry point.
 
@@ -771,6 +774,18 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         Config values for this run only, over settings.json — the CLI's
         ``--cores`` and ``--timeout`` as ``num_cores`` / ``sim_timeout_sec``.
         ``None`` values are ignored.
+    resume:
+        A ``run_store.UnfinishedRun`` to continue instead of starting a new
+        run: its archived templates, waveform folders and result-shaping
+        settings are reused, and only the cases without a row in its journal
+        (or lost with a worker) are simulated. The caller checks that the
+        datasheet is the one the run started with (``problem_with``).
+
+    The run's record is written before the first case (``run_store.begin_run``)
+    and every finished worker batch is appended to its journal, so a run that
+    is interrupted keeps what it simulated. The results frame carries the
+    run's timestamp in ``attrs["run_ts"]``; ``run_store.save_run`` completes
+    the record.
 
     Returns
     -------
@@ -781,6 +796,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
     """
     pool = None
     detector = None
+    journal = None
     log.info("run_sim() started. Testbenches: %d", len(stim.tests))
 
     try:
@@ -792,6 +808,17 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         param_sets = generate_cases(stim)
         log.info("Total cases: %d", len(param_sets))
         cfg = app_config.load_config()
+        if resume is not None:
+            # Run ids are positions in the case list: a different count means
+            # the cases are not the ones the run started with.
+            if resume.planned_runs != len(param_sets):
+                raise ValueError(
+                    f"run_{resume.ts} planned {resume.planned_runs} cases, the "
+                    f"datasheet now gives {len(param_sets)}: it cannot be continued.")
+            # What shaped the first part's results shapes the rest; overrides
+            # given now (a longer --timeout) still win.
+            cfg.update(resume.result_settings())
+            templates_dir = resume.templates_dir or templates_dir
         cfg.update({k: v for k, v in (overrides or {}).items() if v is not None})
         # Resolve each testbench's engine: its own ``engine:`` wins, else the CLI
         # --simulator override, else the simulator_engine setting, else ngspice.
@@ -802,6 +829,11 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         engines_in_use = sorted({t.engine for t in stim.tests})
         engine_instances = [get_simulator_engine(n) for n in engines_in_use]
         log.info("Simulator engine(s) in use: %s", ", ".join(engines_in_use))
+        engines_by_tb = {t.tb_path: t.engine for t in stim.tests}
+        if resume is not None and resume.meta.get("engines") not in (None, {}, engines_by_tb):
+            raise ValueError(
+                f"run_{resume.ts} ran on {resume.meta['engines']}, this run would use "
+                f"{engines_by_tb} (a different --simulator?): it cannot be continued.")
 
         if _is_aborted():
             raise InterruptedError("Aborted before template generation.")
@@ -819,17 +851,26 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
 
         # Assign a stable zero-padded run_id to every parameter case.
         run_ids = [f"{i:06d}" for i in range(len(param_sets))]
+        out_root = Path(out_dir or settings.OUT_DIR)
 
-        analysis_dirs = _create_analysis_dirs(stim, out_dir or settings.OUT_DIR)
+        if resume is not None:
+            run_ts = resume.ts
+            analysis_dirs = resume.analysis_dirs()
+            for directory in analysis_dirs.values():
+                Path(directory).mkdir(parents=True, exist_ok=True)
+            done = resume.done_rows()
+        else:
+            run_ts = run_store.new_run_ts(out_root)
+            analysis_dirs = _create_analysis_dirs(stim, out_root, run_ts)
+            done = {}
+        todo = [(params, run_id) for params, run_id in zip(param_sets, run_ids)
+                if run_id not in done]
 
-        results = []
+        results = list(done.values())
         num_cores = cfg.get("num_cores") or util.get_num_cores()
-        log.info("Spawning pool: %d workers, %d tasks.", num_cores, len(param_sets))
-
         total_tasks = len(param_sets)
-        completed = 0
+        completed = len(results)
 
-        # ── Pool execution ────────────────────────────────────────────────────
         # Avoid plain 'fork' in GUI/threaded parents; use forkserver/spawn.
         configured_method = cfg.get("process_start_method", "auto")
         if configured_method == "auto":
@@ -839,25 +880,39 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         else:
             log.warning("Unknown process_start_method=%r, falling back to auto.", configured_method)
             start_method = "forkserver" if sys.platform.startswith("linux") else "spawn"
-        ctx = get_context(start_method)
-        pool = ctx.Pool(processes=num_cores)
-        log.debug("Pool created (%s, %d workers).", start_method, num_cores)
-        detector = _LostBatchDetector(
-            Path(settings.FAST_TMP) / f"claims_{os.getpid()}_{time.time_ns()}"
-        )
 
         # Batch tasks to reduce scheduler/IPC overhead while keeping polling.
         # Each batch item is a (params, run_id) pair so workers can persist
         # per-analysis CSVs with the correct run_id in the filename.
-        chunk_size = _resolve_chunk_size(cfg, total_tasks, num_cores)
+        chunk_size = _resolve_chunk_size(cfg, len(todo), num_cores)
         # The run's settings, fixed for its whole duration: every worker batch
         # pins them (simulate_case_batch).
         run_cfg = {key: cfg[key] for key in app_config.RUN_KEYS if key in cfg}
         run_cfg.update(num_cores=num_cores, process_start_method=start_method,
                        chunk_size=chunk_size,
                        sim_timeout_sec=_resolve_sim_timeout(cfg))
-        param_id_pairs = list(zip(param_sets, run_ids))
-        param_id_batches = list(_chunk_args(param_id_pairs, chunk_size))
+
+        # The run's record starts before its first case, so an interrupted
+        # run keeps what it simulated (run_store).
+        if resume is not None:
+            journal = run_store.continue_run(resume, run_settings=run_cfg)
+            log.info("Resuming run_%s: %d of %d cases done, %d to go.",
+                     run_ts, len(done), total_tasks, len(todo))
+        else:
+            journal = run_store.begin_run(
+                stim, out_root, run_ts, planned_runs=total_tasks,
+                analysis_dirs=analysis_dirs, run_settings=run_cfg,
+                engines=engines_by_tb)
+
+        # ── Pool execution ────────────────────────────────────────────────────
+        log.info("Spawning pool: %d workers, %d tasks.", num_cores, len(todo))
+        ctx = get_context(start_method)
+        pool = ctx.Pool(processes=num_cores) if todo else None
+        log.debug("Pool created (%s, %d workers).", start_method, num_cores)
+        detector = _LostBatchDetector(
+            Path(settings.FAST_TMP) / f"claims_{os.getpid()}_{time.time_ns()}"
+        )
+        param_id_batches = list(_chunk_args(todo, chunk_size))
         # Each entry keeps its own batch alongside the AsyncResult so a worker
         # that dies can still be accounted for case by case (_lost_batch_rows).
         pending = [
@@ -879,7 +934,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         chunk_batch_counter = 0
         chunk_row_buffer: list = []
 
-        with tqdm(total=total_tasks) as pbar:
+        with tqdm(total=total_tasks, initial=completed) as pbar:
             while pending:
                 if _is_aborted():
                     log.info("Abort flag detected – terminating pool.")
@@ -913,6 +968,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
                         still_pending.append((ar, batch, index))
                         continue
 
+                    journal.append(batch_results)
                     results.extend(batch_results)
                     completed += len(batch_results)
                     if chunk_callback and batch_results:
@@ -950,24 +1006,28 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
                 log.debug("chunk_callback failed on final flush.", exc_info=True)
             chunk_row_buffer = []
 
-        if tasks_lost:
-            # A lost task stays in the pool's cache, and a closed pool waits
-            # for that cache to drain: join() would never return. Every worker
-            # left is idle by now.
-            pool.terminate()
-        else:
-            pool.close()
-        pool.join()
+        if pool is not None:
+            if tasks_lost:
+                # A lost task stays in the pool's cache, and a closed pool waits
+                # for that cache to drain: join() would never return. Every
+                # worker left is idle by now.
+                pool.terminate()
+            else:
+                pool.close()
+            pool.join()
         log.info("Pool finished cleanly. %d results collected.", len(results))
 
         # Surface analysis-capture failures recorded by workers (worker logging
         # doesn't reach chipify.log under forkserver, so the reason rides the row).
         _log_capture_failures(results)
 
+        # In case order: a resumed run's rows arrive in two parts.
+        results.sort(key=lambda row: str(row.get("run_id", "")))
         result_df = _assemble_result_df(results, analysis_dirs)
         # What produced these results, for the run's sidecar (run_store).
+        result_df.attrs["run_ts"] = run_ts
         result_df.attrs["run_settings"] = run_cfg
-        result_df.attrs["engines"] = {t.tb_path: t.engine for t in stim.tests}
+        result_df.attrs["engines"] = engines_by_tb
         return result_df
 
     except InterruptedError:
@@ -992,6 +1052,8 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         raise
 
     finally:
+        if journal is not None:
+            journal.close()
         if detector is not None:
             detector.close()
         clear_abort_flag()

@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Preparation for the initial public release.
 
 ### Added
+- Interrupted runs keep what they simulated. Every finished case is written
+  to the run's journal (`history/run_<ts>.rows.jsonl`) as the sweep goes,
+  instead of all results only after the last case, which made a host standby,
+  a container stop, an out-of-memory kill or a cancel lose the whole
+  datasheet. `chipify-cli -c <datasheet> --resume` continues the run: only the
+  cases without a result (or lost with a worker process) are simulated, with
+  the run's own netlists and settings; it is refused when the datasheet has
+  changed since the run started.
 - `chipify-cli` options for one invocation, without editing `settings.json`:
   `--cores N` and `--timeout SEC` replace `num_cores` and `sim_timeout_sec`,
   `--out DIR` replaces the output folder (results, history, waveforms,
@@ -83,6 +91,10 @@ Preparation for the initial public release.
   via `settings.json`, falling back to the default structure when unset.
 
 ### Changed
+- A history run (`history/run_<ts>.csv`) is named after the start of the run,
+  not its end, and its waveform folders (`analysis_data/<kind>/<ts>/`) carry
+  the same timestamp. Its sidecar exists from the first case on, marked
+  `"complete": false` until the run finishes.
 - The CLI and the GUI save a finished run the same way (`run_store.save_run`).
   CLI runs now keep the netlist templates they simulated in
   `history/run_<ts>_templates/`, as GUI runs already did, so a sample of a CLI
