@@ -293,6 +293,116 @@ def test_datasheet_order_from_project_yaml(project, monkeypatch, capsys):
     assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "beta", "alpha"]
 
 
+def _recording_run_sim(project, monkeypatch):
+    """Replace run_sim; return the list of the overrides each call received."""
+    from chipify import simulator
+
+    seen = []
+
+    def run_sim(stim, *, out_dir=None, overrides=None, **_kw):
+        project["calls"].append(Path(out_dir))
+        seen.append(overrides)
+        df = _results()
+        df.attrs["analysis_dirs"] = simulator._create_analysis_dirs(stim, out_dir)
+        return df
+
+    monkeypatch.setattr(simulator, "run_sim", run_sim)
+    return seen
+
+
+def test_cores_and_timeout_override_the_settings_for_one_run(project, monkeypatch, capsys):
+    seen = _recording_run_sim(project, monkeypatch)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                    "--cores", "3", "--timeout", "600")
+    assert code == 0
+    assert seen == [{"num_cores": 3, "sim_timeout_sec": 600.0}] * 2
+
+
+def test_without_overrides_the_settings_apply(project, monkeypatch, capsys):
+    seen = _recording_run_sim(project, monkeypatch)
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert seen == [{"num_cores": None, "sim_timeout_sec": None}] * 2
+
+
+@pytest.mark.parametrize("argv", [
+    ("--cores", "0"), ("--cores", "two"), ("--cores", "2.5"),
+    ("--timeout", "0"), ("--timeout", "-5"), ("--timeout", "nan"), ("--timeout", "inf"),
+])
+def test_invalid_overrides_are_rejected_before_anything_runs(
+        project, monkeypatch, capsys, argv):
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]), *argv)
+    assert code == 2
+    assert project["calls"] == []
+
+
+def test_only_runs_the_selected_datasheets(project, monkeypatch, capsys):
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--only", "al*", "--reports", "--json")
+    assert code == 0
+    assert project["calls"] == [project["out"] / "alpha"]
+    assert [s["yaml"] for s in lines[-1]["batch_summary"]] == ["alpha.yaml"]
+    assert _outline_titles(lines[-1]["combined_report"]) == ["Summary", "alpha"]
+
+
+def test_only_takes_several_patterns_and_keeps_the_batch_order(project, monkeypatch, capsys):
+    (project["batch"] / "gamma.yaml").write_text(
+        _DATASHEET.format(description="gamma checks"), encoding="utf-8")
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                    "--only", "gamma.yaml", "--only", "alpha")
+    assert code == 0
+    assert project["calls"] == [project["out"] / "alpha", project["out"] / "gamma"]
+
+
+def test_only_without_a_match_names_the_datasheets(project, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "--batch", str(project["batch"]),
+                                      "--only", "Alpha"])  # case-sensitive
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert "there are: alpha, beta" in capsys.readouterr().out
+    assert project["calls"] == []
+
+
+def test_only_needs_batch(project, monkeypatch, capsys):
+    code, _ = _main(monkeypatch, capsys, "--only", "alpha")
+    assert code == 2
+
+
+def test_out_moves_everything_a_batch_writes(project, monkeypatch, capsys):
+    elsewhere = (project["root"] / "elsewhere").resolve()
+    code, lines = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                        "--out", str(elsewhere), "--reports", "--json")
+    assert code == 0
+    assert project["calls"] == [elsewhere / "alpha", elsewhere / "beta"]
+    assert Path(lines[-1]["combined_report"]).parent.parent == elsewhere / "reports"
+    assert (elsewhere / "alpha" / "history").is_dir()
+    assert not (project["out"] / "alpha").exists()
+
+    # --report-only finds those runs only where they were written.
+    from chipify import simulator
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("--report-only must not simulate")
+
+    monkeypatch.setattr(simulator, "run_sim", must_not_run)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                    "--report-only", "--out", str(elsewhere))
+    assert code == 0
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]), "--report-only")
+    assert code == 1
+
+
+def test_out_applies_to_a_single_run(project, monkeypatch, capsys):
+    from chipify import settings
+
+    monkeypatch.setattr(settings, "IN_DIR", project["batch"])
+    elsewhere = (project["root"] / "elsewhere").resolve()
+    code, _ = _main(monkeypatch, capsys, "-c", "alpha.yaml", "--out", str(elsewhere))
+    assert code == 0
+    assert project["calls"] == [elsewhere]
+    assert (elsewhere / "simulation_results.csv").is_file()
+
+
 def test_order_datasheets_accepts_names_and_stems(tmp_path, caplog):
     from chipify import project_config
 

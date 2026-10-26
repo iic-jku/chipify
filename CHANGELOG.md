@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Preparation for the initial public release.
 
 ### Added
+- `chipify-cli` options for one invocation, without editing `settings.json`:
+  `--cores N` and `--timeout SEC` replace `num_cores` and `sim_timeout_sec`,
+  `--out DIR` replaces the output folder (results, history, waveforms,
+  reports and `chipify.log`), and `--only PATTERN` (repeatable, matching a
+  datasheet's file name or stem) runs only some datasheets of a `--batch`.
 - `chipify-cli --batch DIR --reports` writes one combined PDF,
   `out/reports/<timestamp>/batch_report_<timestamp>.pdf`: a summary page with
   one row per datasheet (runs, valid, passed, yield, time, start page), the
@@ -94,6 +99,10 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- Editing `settings.json` while a sweep ran changed the cases still to come:
+  every worker read the settings again for each case, so a new
+  `sim_timeout_sec` (or VACASK path) applied from the middle of the run on. A
+  run now keeps the settings it started with.
 - The waveform hover lost its tooltip if a full redraw was still queued when
   the pointer reached a curve: Qt ran that redraw inside the hover's own
   repaint, the hover reset itself for it, and the tooltip and the highlight

@@ -1,5 +1,7 @@
 ﻿# Copyright (c) 2026 Santiago Hofwimmer
 import argparse
+import fnmatch
+import math
 import os
 import sys
 import json
@@ -85,7 +87,8 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
                 templates_dir: str | None = None,
                 progress_stream: bool = False,
                 out_dir: str | os.PathLike[str] | None = None,
-                reports: bool = False):
+                reports: bool = False,
+                overrides: dict | None = None):
     """Run simulation for one yaml file.
 
     Returns a ``report_service.BatchEntry`` (results, datasheet, summary dict,
@@ -96,6 +99,8 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
         Defaults to the global OUT_DIR; batch mode passes a per-datasheet
         subdirectory so consecutive runs don't overwrite or read each other's
         results and waveforms.
+    overrides:
+        Settings for this run over settings.json (``--cores``, ``--timeout``).
     """
     import time
     from chipify import report_service
@@ -114,12 +119,14 @@ def _run_single(yaml_path: str | os.PathLike[str], *, json_out: bool = False,
             templates_dir=templates_dir or "",
             progress_callback=progress_cb,
             out_dir=out_dir,
+            overrides=overrides,
         )
     except Exception as exc:
         # run_sim raises on unexpected failures and returns None only on abort,
         # so print the actual reason instead of a generic "no data".
+        from chipify import app_config
         print(f"[-] Simulation failed for {yaml_path}: {exc}")
-        print(f"    See {Path(settings.OUT_DIR) / 'chipify.log'} for the traceback.")
+        print(f"    See {app_config.LOG_PATH} for the traceback.")
         return None
     duration_s = time.perf_counter() - t0
 
@@ -185,6 +192,39 @@ def _load_finished_run(yaml_path: str | os.PathLike[str], *,
     return entry
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
+def _positive_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not (math.isfinite(value) and value > 0):
+        raise argparse.ArgumentTypeError(f"must be a number greater than 0, got {text}")
+    return value
+
+
+def _select_datasheets(paths: list[Path], patterns: list[str] | None) -> list[Path]:
+    """The datasheets whose file name or stem matches one of *patterns*.
+
+    Shell-style and case-sensitive on every platform, so a selection written
+    on one machine picks the same datasheets on another. No patterns: all.
+    """
+    if not patterns:
+        return paths
+    return [p for p in paths
+            if any(fnmatch.fnmatchcase(p.name, pat) or fnmatch.fnmatchcase(p.stem, pat)
+                   for pat in patterns)]
+
+
 def main():
     # Pin the non-interactive backend before anything draws. pdf_export and
     # plot_manager use pyplot without choosing one, so with DISPLAY set and
@@ -232,6 +272,18 @@ def main():
     )
 
     parser.add_argument(
+        "--only",
+        metavar="PATTERN",
+        action="append",
+        default=None,
+        help=(
+            "With --batch: only the datasheets whose file name or stem\n"
+            "matches PATTERN (shell-style, case-sensitive, e.g. 'corners_*').\n"
+            "Repeat to select more. The combined report covers the selection."
+        ),
+    )
+
+    parser.add_argument(
         "--json",
         action="store_true",
         default=False,
@@ -274,6 +326,39 @@ def main():
     )
 
     parser.add_argument(
+        "--cores",
+        metavar="N",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Worker processes for this run, instead of num_cores in\n"
+            "settings.json (default: the setting, else every CPU core)."
+        ),
+    )
+
+    parser.add_argument(
+        "--timeout",
+        metavar="SEC",
+        type=_positive_float,
+        default=None,
+        help=(
+            "Time limit per simulation in seconds for this run, instead of\n"
+            "sim_timeout_sec in settings.json."
+        ),
+    )
+
+    parser.add_argument(
+        "--out",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Output folder for this run instead of out/ (or out_dir in\n"
+            "settings.json): results, history, waveforms, reports and\n"
+            "chipify.log. --report-only reads the finished runs from there."
+        ),
+    )
+
+    parser.add_argument(
         "--reports",
         action="store_true",
         help=(
@@ -306,6 +391,13 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.only and not args.batch:
+        parser.error("--only selects datasheets of a --batch run")
+
+    # One output root for everything this invocation writes. The settings
+    # overrides go to run_sim, which pins them for its workers.
+    out_root = Path(args.out).expanduser().resolve() if args.out else Path(settings.OUT_DIR)
+    overrides = {"num_cores": args.cores, "sim_timeout_sec": args.timeout}
 
     # Initialised after parse_args so --help / --version don't open a log
     # file. Full DEBUG detail goes to out/chipify.log; the terminal keeps
@@ -313,19 +405,29 @@ def main():
     # warnings breaking in.
     import logging
     from chipify import app_config
-    app_config.setup_logging(console_level=logging.WARNING)
+    app_config.setup_logging(console_level=logging.WARNING,
+                             log_path=out_root / "chipify.log" if args.out else None)
 
     # ── Batch mode ────────────────────────────────────────────────────────────
     if args.batch:
         from chipify import project_config, report_service
 
         batch_dir = Path(args.batch)
-        yaml_files = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
-        if not yaml_files:
+        found = project_config.order_datasheets(list(batch_dir.glob("*.yaml")))
+        if not found:
             print(f"[-] No *.yaml files found in: {batch_dir}")
             sys.exit(1)
+        yaml_files = _select_datasheets(found, args.only)
+        if not yaml_files:
+            print(f"[-] --only {' '.join(args.only)} matched no datasheet in "
+                  f"{batch_dir} (there are: {', '.join(p.stem for p in found)})")
+            sys.exit(1)
 
-        print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")
+        if args.only:
+            print(f"[*] Batch mode: {len(yaml_files)} of {len(found)} datasheet(s) "
+                  f"selected in {batch_dir}")
+        else:
+            print(f"[*] Batch mode: {len(yaml_files)} datasheet(s) found in {batch_dir}")
         summaries = []
         entries = []
         all_ok = True
@@ -334,7 +436,7 @@ def main():
             # Per-datasheet output subdirectory so consecutive runs don't
             # overwrite each other's simulation_results.csv.
             stem = yaml_path.stem
-            run_out_dir = Path(settings.OUT_DIR) / stem
+            run_out_dir = out_root / stem
             error = "no finished run" if args.report_only else "no data"
             try:
                 if args.report_only:
@@ -345,7 +447,8 @@ def main():
                                         simulator_override=args.simulator,
                                         templates_dir=args.templates_dir,
                                         progress_stream=args.progress_stream,
-                                        out_dir=run_out_dir, reports=args.reports)
+                                        out_dir=run_out_dir, reports=args.reports,
+                                        overrides=overrides)
             except Exception as exc:  # noqa: BLE001 — one bad datasheet must not end the batch
                 # The datasheet is parsed before _run_single's own guard: a
                 # malformed YAML ended the whole batch, so every later datasheet
@@ -368,7 +471,7 @@ def main():
         batch_line = {"batch_summary": summaries}
         if args.reports or args.report_only:
             print(f"\n{'='*60}")
-            result = report_service.generate_batch_report(entries, settings.OUT_DIR)
+            result = report_service.generate_batch_report(entries, out_root)
             for warning in result.warnings:
                 print(f"[!] {warning}")
             if result.pdf_report:
@@ -396,7 +499,7 @@ def main():
         sys.exit(1)
 
     if args.report_only:
-        entry = _load_finished_run(yaml_path, out_dir=settings.OUT_DIR,
+        entry = _load_finished_run(yaml_path, out_dir=out_root,
                                    json_out=args.json)
     else:
         print("[*] Initialising Chipify...")
@@ -404,7 +507,8 @@ def main():
                             simulator_override=args.simulator,
                             templates_dir=args.templates_dir,
                             progress_stream=args.progress_stream,
-                            reports=args.reports)
+                            out_dir=out_root, reports=args.reports,
+                            overrides=overrides)
     if entry is None:
         sys.exit(1)
 

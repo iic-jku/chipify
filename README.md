@@ -124,6 +124,20 @@ followed by every datasheet's own report, with one bookmark per datasheet.
 `--report-only` rebuilds all of this from each datasheet's newest finished run
 without simulating, for example after editing the `reports:` blocks.
 
+Settings can be changed for one invocation without editing `settings.json`,
+for example on a compute server:
+
+```bash
+chipify-cli --batch ./datasheets --only 'corners_*'   # just some datasheets (repeatable)
+chipify-cli --batch ./datasheets --cores 8 --timeout 3600 --out /scratch/run1
+```
+
+`--only` matches a datasheet's file name or stem, shell-style and case-sensitive;
+the combined report then covers the selection. `--cores` and `--timeout` replace
+`num_cores` and `sim_timeout_sec` (seconds per simulation) for this run, and
+`--out` replaces the output folder, `chipify.log` included. A run keeps the
+settings it started with: editing `settings.json` while it runs does not change it.
+
 A datasheet's optional one-line `description:` (top-level key, also editable in
 the GUI's Datasheet Editor) appears on its report cover and on the summary
 page. An optional `project.yaml` in the project root sets the batch report's

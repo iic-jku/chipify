@@ -565,20 +565,28 @@ def simulate_case_batch(batch_args):
     Each ``Test`` carries its resolved ``engine`` name (set by run_sim); engines
     are instantiated once per worker and reused across the batch, so a datasheet
     can mix engines across testbenches.
-    """
-    param_id_batch, tests, analysis_dirs, claim_path = batch_args
-    _claim_batch(claim_path)
-    engine_for = engine_selector()
 
-    results = []
-    for params, run_id in param_id_batch:
-        # Aborted, or the chipify process that queued this batch has died:
-        # start no further simulator (see abort.parent_gone).
-        if _is_aborted():
-            break
-        results.append(
-            _simulate_single_case(params, tests, engine_for, run_id, analysis_dirs))
-    return results
+    The run's settings travel with every batch and are pinned while it runs
+    (``app_config.set_run_overrides``), so each config read in this worker —
+    the timeout, the VACASK engine's binary and paths — returns what the run
+    started with, CLI overrides included.
+    """
+    param_id_batch, tests, analysis_dirs, claim_path, run_cfg = batch_args
+    _claim_batch(claim_path)
+    previous = app_config.set_run_overrides(run_cfg)
+    try:
+        engine_for = engine_selector()
+        results = []
+        for params, run_id in param_id_batch:
+            # Aborted, or the chipify process that queued this batch has died:
+            # start no further simulator (see abort.parent_gone).
+            if _is_aborted():
+                break
+            results.append(
+                _simulate_single_case(params, tests, engine_for, run_id, analysis_dirs))
+        return results
+    finally:
+        app_config.set_run_overrides(previous)
 
 
 def _chunk_args(worker_args, chunk_size):
@@ -738,7 +746,7 @@ def _check_any_netlist(stim) -> None:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
-            templates_dir: str = "", out_dir=None):
+            templates_dir: str = "", out_dir=None, overrides=None):
     """
     Main simulation entry point.
 
@@ -759,6 +767,10 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
     out_dir:
         Output root that receives ``analysis_data/`` (default
         ``settings.OUT_DIR``). Batch mode passes each datasheet's own folder.
+    overrides:
+        Config values for this run only, over settings.json — the CLI's
+        ``--cores`` and ``--timeout`` as ``num_cores`` / ``sim_timeout_sec``.
+        ``None`` values are ignored.
 
     Returns
     -------
@@ -780,6 +792,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         param_sets = generate_cases(stim)
         log.info("Total cases: %d", len(param_sets))
         cfg = app_config.load_config()
+        cfg.update({k: v for k, v in (overrides or {}).items() if v is not None})
         # Resolve each testbench's engine: its own ``engine:`` wins, else the CLI
         # --simulator override, else the simulator_engine setting, else ngspice.
         # Write the concrete name back onto the (picklable) Test so workers and
@@ -837,6 +850,12 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         # Each batch item is a (params, run_id) pair so workers can persist
         # per-analysis CSVs with the correct run_id in the filename.
         chunk_size = _resolve_chunk_size(cfg, total_tasks, num_cores)
+        # The run's settings, fixed for its whole duration: every worker batch
+        # pins them (simulate_case_batch).
+        run_cfg = {key: cfg[key] for key in app_config.RUN_KEYS if key in cfg}
+        run_cfg.update(num_cores=num_cores, process_start_method=start_method,
+                       chunk_size=chunk_size,
+                       sim_timeout_sec=_resolve_sim_timeout(cfg))
         param_id_pairs = list(zip(param_sets, run_ids))
         param_id_batches = list(_chunk_args(param_id_pairs, chunk_size))
         # Each entry keeps its own batch alongside the AsyncResult so a worker
@@ -846,7 +865,7 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
                 pool.apply_async(
                     simulate_case_batch,
                     ((batch, stim.tests, analysis_dirs,
-                      detector.claim_path(index)),),
+                      detector.claim_path(index), run_cfg),),
                 ),
                 batch,
                 index,

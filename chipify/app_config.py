@@ -42,13 +42,45 @@ DEFAULTS: dict[str, Any] = {
     "tb_dir": None,                   # testbench files    (default: tb/)
 }
 
+#: The settings that shape a run's results, as opposed to GUI preferences. A
+#: run takes them from the config once (``simulator.run_sim``) and pins them in
+#: its worker processes, which otherwise read settings.json again for every
+#: case: a CLI override held by the parent never reached them, and an edit of
+#: settings.json changed the timeout halfway through a sweep.
+RUN_KEYS: tuple[str, ...] = (
+    "num_cores",
+    "simulator_engine",
+    "sim_timeout_sec",
+    "vacask_binary",
+    "vacask_netlist_source",
+    "ng2vc_binary",
+    "vacask_pdk_dir",
+    "process_start_method",
+    "chunk_size",
+)
+
 _logging_ready = False
 _config_cache: dict[str, Any] | None = None
 _config_mtime: float | None = None
+_run_overrides: dict[str, Any] = {}
+
+
+def set_run_overrides(values: dict[str, Any] | None) -> dict[str, Any]:
+    """Pin config values in this process, over settings.json; return the old pin.
+
+    For simulation workers, which pin the settings of the run they work for
+    (see ``RUN_KEYS``). Never in the GUI process: the settings dialog reads the
+    config too, and would save a pinned value back into settings.json.
+    """
+    global _run_overrides
+    previous = _run_overrides
+    _run_overrides = dict(values or {})
+    return previous
 
 
 def setup_logging(level: int = logging.DEBUG,
-                  console_level: int = logging.INFO) -> None:
+                  console_level: int = logging.INFO,
+                  log_path: str | Path | None = None) -> None:
     """
     Initialise the root 'chipify' logger once.
     Safe to call multiple times – subsequent calls are no-ops.
@@ -57,12 +89,17 @@ def setup_logging(level: int = logging.DEBUG,
     always keeps full DEBUG detail. The CLI raises it to WARNING so the
     per-phase INFO stream doesn't bury its own progress output and summary
     table, while still writing the complete log to disk.
+
+    *log_path* replaces ``out/chipify.log`` (the CLI's ``--out``); it also
+    becomes ``LOG_PATH``, which the messages pointing at the log use.
     """
-    global _logging_ready
+    global _logging_ready, LOG_PATH
     if _logging_ready:
         return
 
-    Path(settings.OUT_DIR).mkdir(parents=True, exist_ok=True)
+    if log_path is not None:
+        LOG_PATH = Path(log_path)
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
@@ -107,7 +144,9 @@ def load_config() -> dict[str, Any]:
     """
     Return the merged config (cached; invalidated when settings.json mtime changes).
 
-    Priority (highest wins): settings.json  >  project.yaml defaults  >  DEFAULTS.
+    Priority (highest wins): a run's pinned settings (``set_run_overrides``,
+    worker processes only)  >  settings.json  >  project.yaml defaults  >
+    DEFAULTS.
     """
     global _config_cache, _config_mtime
 
@@ -119,7 +158,7 @@ def load_config() -> dict[str, Any]:
             pass
 
     if _config_cache is not None and current_mtime == _config_mtime:
-        return _config_cache.copy()
+        return {**_config_cache, **_run_overrides}
 
     merged = DEFAULTS.copy()
 
@@ -148,7 +187,7 @@ def load_config() -> dict[str, Any]:
 
     _config_cache = merged
     _config_mtime = current_mtime
-    return merged.copy()
+    return {**merged, **_run_overrides}
 
 
 def save_config(config: dict[str, Any]) -> None:
