@@ -54,12 +54,47 @@ class ExpressionError(Exception):
     """Raised when a user expression cannot be parsed or evaluated safely."""
 
 
+def _numeric(value: Any) -> npt.NDArray[Any]:
+    """*value* as a float array, or as a complex one when it is complex.
+
+    AC results are complex. Casting them to float kept only the real part, so
+    ``last(abs(vout))`` on ``0.5-0.5j`` gave 0.5 instead of 0.7071, with a numpy
+    ComplexWarning nobody saw.
+    """
+    arr = np.asarray(value)
+    return arr if np.iscomplexobj(arr) else arr.astype(float)
+
+
+def _pick(x: Any, index: int) -> float | complex:
+    arr = _numeric(x)
+    return complex(arr[index]) if np.iscomplexobj(arr) else float(arr[index])
+
+
+def _real_result(expr: str, result: Any) -> Any:
+    """A measured value must be real: refuse a complex one rather than drop half.
+
+    Complex results whose imaginary parts are all zero are returned as real.
+    """
+    if not np.iscomplexobj(result):
+        return result
+    arr = np.asarray(result)
+    if np.any(arr.imag != 0):
+        raise ExpressionError(
+            f"{expr!r} evaluates to a complex value; reduce it with abs(), "
+            f"real(), imag() or degrees(angle()), e.g. last(abs(vout))"
+        )
+    return float(arr.real) if arr.ndim == 0 else arr.real
+
+
 def _default_helpers() -> dict[str, Any]:
-    """Return the numpy helpers available in all evaluator contexts."""
+    """Return the numpy helpers available in all evaluator contexts.
+
+    They keep complex input complex (``db`` takes its magnitude); see _numeric.
+    """
     return {
-        "db": lambda x: 20.0 * np.log10(np.abs(np.asarray(x, dtype=float))),
-        "last": lambda x: float(np.asarray(x, dtype=float)[-1]),
-        "first": lambda x: float(np.asarray(x, dtype=float)[0]),
+        "db": lambda x: 20.0 * np.log10(np.abs(_numeric(x))),
+        "last": lambda x: _pick(x, -1),
+        "first": lambda x: _pick(x, 0),
     }
 
 
@@ -151,15 +186,18 @@ class SafeEvaluator:
         signal names are sanitised (v_out_ etc.) and the expression is
         translated accordingly before asteval receives it.
 
+        Complex (AC) vectors stay complex, and a complex result raises
+        ExpressionError: the expression must say which real quantity it wants.
+
         Replaces: ``eval(expr_safe, namespace)`` in simulator.py.
         """
         namespace: dict[str, Any] = {
-            self.sanitise_key(k): np.asarray(v, dtype=float)
+            self.sanitise_key(k): _numeric(v)
             for k, v in results.items()
         }
         safe_expr = self.sanitise_spice_expr(expr)
         log.debug("evaluate_spice_measure: %r → %r", expr, safe_expr)
-        return self.evaluate_scalar(safe_expr, namespace)
+        return _real_result(expr, self.evaluate_scalar(safe_expr, namespace))
 
     def evaluate_vector(
         self,

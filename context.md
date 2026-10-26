@@ -99,6 +99,7 @@ Plugins: the Qt GUI loads `QtTabPlugin`s; legacy Tk `TabPlugin`s are detected an
 ### Safe Expression Evaluation (`expression.py`)
 *   **Never** call Python `eval()`, `exec()`, or `df.eval(engine='python')` directly in user-facing code.
 *   **The Fix:** Route all expression evaluation through `SafeEvaluator` (module-level singleton: `from chipify.expression import default_evaluator`). It blocks `__import__`, `open`, `exec`, and dunder attribute access via `asteval`.
+*   **Never cast measure data to float.** AC vectors are complex: `evaluate_spice_measure` and the `db`/`first`/`last` helpers keep them complex (`expression._numeric`), and a measure result that is still complex raises `ExpressionError` (`_real_result`). The float cast kept only the real part, with nothing but a numpy ComplexWarning.
 
 ### YAML Range Parsing (`schema.py`)
 *   **Never** use `str.replace("range(","")` or raw `eval()` to expand YAML range strings.

@@ -261,7 +261,18 @@ def _vacask_extract_results(raw_file: str | os.PathLike[str], test,
             None,
         )
         if raw_val is not None:
-            arr = np.asarray(raw_val, dtype=float)
+            arr = np.asarray(raw_val)
+            if np.iscomplexobj(arr):
+                # An AC vector has no single real value; the float cast this
+                # replaced silently kept its real part.
+                if np.any(arr.imag != 0):
+                    return None, (
+                        f"MEASURE_ERROR({val_obj.name}): the .raw holds a complex AC "
+                        f"vector under this name; add a measure: expression such as "
+                        f"last(abs({val_obj.name}))"
+                    )
+                arr = arr.real
+            arr = arr.astype(float)
             # Scalar meas result → use directly; vector → take last point
             scalar_strs.append(str(float(arr) if arr.ndim == 0 else float(arr.flat[-1])))
             n_resolved += 1

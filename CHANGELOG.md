@@ -90,6 +90,13 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- VACASK `measure:` expressions on AC data used only the real part of every
+  complex vector: `last(abs(vout))` of an RC filter at 1 MHz gave 2.5e-6
+  instead of 1.6e-3, and its phase read 0°. Complex vectors now stay complex
+  (`abs`, `real`, `imag`, `degrees(angle(...))` and `db` work as expected),
+  and a measure whose result is still complex is an error that says how to
+  reduce it, as is a value named after a complex AC vector without a
+  `measure:`.
 - VACASK: a declared `transient_signals` / `dc_signals` / `ac_signals` entry
   that was missing from the `.raw` output was written as a column of zeros,
   so the run kept a flat, apparently valid waveform. The capture now fails,

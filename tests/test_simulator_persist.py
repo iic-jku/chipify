@@ -362,6 +362,40 @@ def test_vacask_missing_waveform_signal_is_reported_not_zero_filled(
     assert "v(out)" in errors["transient"]
 
 
+def _patch_ac_raw(monkeypatch, bucket) -> None:
+    from chipify.engines import vacask as vacask_mod
+    monkeypatch.setattr(vacask_mod.Path, "exists", lambda _self: True)
+    monkeypatch.setattr(vacask_mod, "_read_raw_file", lambda _f: {"ac": bucket})
+
+
+_AC_BUCKET = {"__x__": [1.0, 1e3], "frequency": [1.0, 1e3], "vout": [1 + 0j, 0.5 - 0.5j]}
+
+
+def test_vacask_measure_on_ac_data_uses_the_magnitude(monkeypatch) -> None:
+    """An AC-only bench's measure: saw float-cast vectors: 0.5, not 0.7071."""
+    _patch_ac_raw(monkeypatch, _AC_BUCKET)
+    test = _vacask_test(["gain"], measure={"gain": "last(abs(vout))"})
+    line, err = simulator._vacask_extract_results("x.raw", test, {})
+    assert err is None
+    assert float(line.replace("MY_DATA:", "")) == pytest.approx(0.7071067811865476)
+
+
+def test_vacask_complex_value_without_a_reduction_is_an_error(monkeypatch) -> None:
+    """A value named after a complex AC vector used to report its real part."""
+    _patch_ac_raw(monkeypatch, _AC_BUCKET)
+    line, err = simulator._vacask_extract_results("x.raw", _vacask_test(["vout"]), {})
+    assert line is None
+    assert "MEASURE_ERROR(vout)" in err and "last(abs(vout))" in err
+
+
+def test_vacask_complex_measure_result_is_an_error(monkeypatch) -> None:
+    _patch_ac_raw(monkeypatch, _AC_BUCKET)
+    test = _vacask_test(["vlast"], measure={"vlast": "last(vout)"})
+    line, err = simulator._vacask_extract_results("x.raw", test, {})
+    assert line is None
+    assert "MEASURE_ERROR(vlast)" in err and "complex value" in err
+
+
 def test_vacask_extract_partial_match_is_not_an_error(monkeypatch) -> None:
     """If at least one value resolves, the row is kept (missing ones → nan)."""
     _patch_raw(monkeypatch, {"outp": [0.9], "__x__": [0.0]})

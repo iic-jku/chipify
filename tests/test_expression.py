@@ -99,6 +99,40 @@ def test_evaluate_spice_measure(ev: SafeEvaluator) -> None:
     assert float(val) == pytest.approx(1.0)
 
 
+# ── Complex (AC) vectors ──────────────────────────────────────────────────────
+
+_AC = {"vout": np.array([1.0 + 0.0j, 0.5 - 0.5j])}
+
+
+@pytest.mark.parametrize("expr, expected", [
+    # The float cast kept only the real part: 0.5 instead of 0.7071.
+    ("last(abs(vout))", 0.7071067811865476),
+    ("db(last(vout))", 20 * math.log10(0.7071067811865476)),
+    ("last(db(vout))", 20 * math.log10(0.7071067811865476)),
+    ("last(real(vout))", 0.5),
+    ("last(imag(vout))", -0.5),
+    ("degrees(angle(last(vout)))", -45.0),
+    ("first(abs(vout))", 1.0),
+])
+def test_spice_measure_keeps_complex_vectors(ev, expr, expected) -> None:
+    assert float(ev.evaluate_spice_measure(expr, _AC)) == pytest.approx(expected)
+
+
+def test_spice_measure_refuses_a_complex_result(ev) -> None:
+    """Half of the value used to vanish silently; now it says how to reduce it."""
+    with pytest.raises(ExpressionError, match="complex value.*abs\\(\\)"):
+        ev.evaluate_spice_measure("last(vout)", _AC)
+
+
+def test_spice_measure_accepts_a_complex_result_without_imaginary_part(ev) -> None:
+    val = ev.evaluate_spice_measure("first(vout)", _AC)
+    assert val == pytest.approx(1.0) and isinstance(val, float)
+
+
+def test_real_helpers_still_return_python_floats(ev) -> None:
+    assert type(ev.evaluate_scalar("last(x)", {"x": np.array([1, 2])})) is float
+
+
 # ── Security: blocked constructs ──────────────────────────────────────────────
 
 def test_blocks_import(ev: SafeEvaluator) -> None:
