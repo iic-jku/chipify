@@ -18,7 +18,7 @@
 | `schema.py` | `validate_datasheet()` — validates `datasheet.yaml` against typed schema; safe `_parse_range_dsl()` for `range/linspace/logspace` strings. |
 | `expression.py` | `SafeEvaluator` — sandboxed `asteval`-backed evaluator with `numexpr` fast path. Replaces all `eval()` / `df.eval()` call-sites. |
 | `templating.py` | `render_netlist()` — the one Jinja2 configuration for per-sample netlists (simulation workers and the netlist export): `StrictUndefined`, and `keep_trailing_newline` because VACASK needs the deck's final newline. |
-| `run_store.py` | `save_run()` — the one way a finished run is written, for the CLI and the GUI alike: latest CSV, history copy, both sidecars, the archived netlist templates and the `.latest` waveform pointers. |
+| `run_store.py` | `save_run()` — the one way a finished run is written, for the CLI and the GUI alike: latest CSV, history copy, both sidecars, the archived netlist templates, the datasheet snapshot (`Stimuli.source_bytes`, the bytes it parsed, with their SHA-256 in the sidecar) and the `.latest` waveform pointers. The run's settings and engines arrive as `df.attrs["run_settings"]` / `["engines"]` from `run_sim`. |
 | `app_config.py` | Persistent user preferences (`settings.json`), application-wide logging setup. |
 | `simulator.py` | Multiprocessing simulation engine (`NgspiceSimulator`, `VacaskSimulator`). File-based abort via `/tmp/sim_work/abort.flag`. |
 | `plot_manager.py` | All Matplotlib logic. Avoids GUI bloat. |

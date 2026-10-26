@@ -21,12 +21,23 @@ Schema (v1)
   "global_yield":   99.4,
   "templates_dir":  "",            // persisted netlist templates of this run
   "analysis_dirs":  {"transient": "analysis_data/transient/20260506_150000"},
+  "chipify":        "0.2.3",       // the chipify that ran it, and where it was
+  "chipify_path":   "/foss/designs/chipify/chipify",
+  "datasheet_sha256":   "9f2c...", // of the datasheet bytes the run parsed
+  "datasheet_snapshot": "history/run_20260506_150000.datasheet.yaml",
+  "settings":       {"sim_timeout_sec": 600.0, "num_cores": 8, ...},
+  "engines":        {"tb_amp": "ngspice"},
   "notes":          "",
   "tags":           []
 }
 
 All fields except `schema_version` and `timestamp` are optional /
 best-effort so older code loading new meta files does not crash.
+
+``git_commit`` is the commit of the working directory, i.e. of the design
+project chipify ran in, not of chipify itself: that is ``chipify`` and
+``chipify_path``. ``settings`` holds the run's settings as its workers used
+them (``app_config.RUN_KEYS``, CLI overrides applied, ``auto`` values resolved).
 
 ``analysis_dirs`` / ``tran_dir`` are stored relative to the run's output root
 (the folder holding ``history/``), so an ``out/`` folder that is moved or copied
@@ -104,6 +115,17 @@ def _git_commit() -> str:
         return ""
 
 
+def _chipify_install() -> tuple[str, str]:
+    """``(version, package directory)`` of the running chipify.
+
+    An environment can hold a packaged chipify and a working tree that report
+    the same version (the IIC-OSIC-TOOLS container ships one preinstalled), so
+    the version alone does not say which one produced a run.
+    """
+    import chipify
+    return chipify.__version__, str(Path(chipify.__file__).resolve().parent)
+
+
 def _meta_path(csv_path: str | os.PathLike[str]) -> Path:
     """Given a run CSV path, return the companion .meta.json path."""
     return Path(csv_path).with_suffix(".meta.json")
@@ -142,6 +164,10 @@ def write_meta(
     tran_dir: str = "",
     analysis_dirs: dict | None = None,
     templates_dir: str = "",
+    datasheet_sha256: str = "",
+    datasheet_snapshot: str = "",
+    settings: dict | None = None,
+    engines: dict | None = None,
 ) -> str:
     """
     Write a sidecar .meta.json next to *csv_path*.
@@ -150,9 +176,10 @@ def write_meta(
     directory of this run, so the GUI can resolve waveform data for any kind
     when a history run is re-loaded. ``tran_dir`` is the legacy
     transient-only alias. Both are written relative to the run's output root
-    (see :func:`output_root`) when they lie inside it. ``templates_dir`` holds
-    this run's persisted Jinja2 netlist templates (one ``<safe_tb>.spice|.sim``
-    per testbench).
+    (see :func:`output_root`) when they lie inside it, as is
+    ``datasheet_snapshot``, the copy of the datasheet the run parsed.
+    ``templates_dir`` holds this run's persisted Jinja2 netlist templates (one
+    ``<safe_tb>.spice|.sim`` per testbench).
 
     Returns the path written, or "" on failure.
     """
@@ -162,6 +189,7 @@ def write_meta(
         kind: _relative_to_root(str(d or ""), root)
         for kind, d in (analysis_dirs or {}).items()
     }
+    chipify_version, chipify_path = _chipify_install()
     meta: dict = {
         "schema_version": _SCHEMA_VERSION,
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -178,6 +206,12 @@ def write_meta(
         "tran_dir": tran_dir,
         "analysis_dirs": dict(analysis_dirs or {}),
         "templates_dir": templates_dir,
+        "chipify": chipify_version,
+        "chipify_path": chipify_path,
+        "datasheet_sha256": datasheet_sha256,
+        "datasheet_snapshot": _relative_to_root(str(datasheet_snapshot or ""), root),
+        "settings": dict(settings or {}),
+        "engines": dict(engines or {}),
         "notes": "",
         "tags": [],
     }

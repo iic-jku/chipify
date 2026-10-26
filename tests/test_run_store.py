@@ -59,6 +59,60 @@ def test_a_failed_history_copy_still_leaves_the_latest_results(tmp_path):
     assert run_meta.read_meta(saved.latest_csv)["yaml"] == "amp.yaml"
 
 
+def test_a_run_records_what_produced_it(tmp_path):
+    """The sidecar named the datasheet file but not its contents, chipify's
+    version or the settings, so a run could not be traced to what made it."""
+    import hashlib
+
+    import chipify
+
+    source = b"\xef\xbb\xbfparameters:\r\n  temp: [27]\r\n"   # BOM and CRLF kept
+    stim = _stim()
+    stim.source_bytes = source
+    df = _results()
+    df.attrs["run_settings"] = {"sim_timeout_sec": 600.0, "num_cores": 2}
+    df.attrs["engines"] = {"tb": "ngspice"}
+    saved = run_store.save_run(df, stim, out_dir=tmp_path, duration_s=1.0,
+                               yaml_name="amp.yaml")
+
+    for csv in (saved.latest_csv, saved.history_csv):
+        meta = run_meta.read_meta(csv)
+        assert meta["datasheet_sha256"] == hashlib.sha256(source).hexdigest()
+        assert (tmp_path / meta["datasheet_snapshot"]).read_bytes() == source
+        assert meta["settings"] == {"sim_timeout_sec": 600.0, "num_cores": 2}
+        assert meta["engines"] == {"tb": "ngspice"}
+        assert meta["chipify"] == chipify.__version__
+        assert Path(meta["chipify_path"]) == Path(chipify.__file__).resolve().parent
+    assert run_meta.read_meta(saved.history_csv)["datasheet_snapshot"] == (
+        saved.history_csv.with_suffix(".datasheet.yaml").relative_to(tmp_path).as_posix())
+
+
+def test_a_datasheet_keeps_the_bytes_it_was_parsed_from(tmp_path):
+    """Read as bytes for the record; a BOM and CRLF line ends parse as before."""
+    from chipify.util import Stimuli
+
+    text = ("description: |\n  two\n  lines\nparameters:\n  corner:\n    - tt\n    - ss\n"
+            "tests:\n  tb:\n    gain: {min: 9, max: 11}\n")
+    lf = tmp_path / "lf.yaml"
+    lf.write_bytes(text.encode("utf-8"))
+    crlf = tmp_path / "crlf.yaml"
+    crlf.write_bytes(b"\xef\xbb\xbf" + text.replace("\n", "\r\n").encode("utf-8"))
+
+    a, b = Stimuli(lf), Stimuli(crlf)
+    assert a.source_bytes == lf.read_bytes() and b.source_bytes == crlf.read_bytes()
+    assert (a.description, a.params) == (b.description, b.params) == (
+        "two lines", {"corner": ["tt", "ss"]})
+    assert [t.tb_path for t in a.tests] == [t.tb_path for t in b.tests] == ["tb"]
+
+
+def test_a_datasheet_built_in_code_records_no_snapshot(tmp_path):
+    saved = run_store.save_run(_results(), _stim(), out_dir=tmp_path,
+                               duration_s=1.0, yaml_name="")
+    meta = run_meta.read_meta(saved.history_csv)
+    assert meta["datasheet_sha256"] == "" and meta["datasheet_snapshot"] == ""
+    assert not list((tmp_path / "history").glob("*.datasheet.yaml"))
+
+
 def test_a_run_without_templates_archives_nothing(tmp_path):
     saved = run_store.save_run(_results(), _stim(template=""), out_dir=tmp_path,
                                duration_s=1.0, yaml_name="amp.yaml")

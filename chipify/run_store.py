@@ -7,6 +7,8 @@ datasheet's own folder):
 
 - ``simulation_results.csv`` and its sidecar: the latest run;
 - ``history/run_<ts>.csv`` and its sidecar: the permanent copy;
+- ``history/run_<ts>.datasheet.yaml``: the datasheet exactly as the run parsed
+  it (its SHA-256 is in the sidecar, with the run's settings and engines);
 - ``history/run_<ts>_templates/``: the netlist templates the run simulated,
   reusable with ``--templates-dir`` and by the per-sample netlist export;
 - ``analysis_data/<kind>/.latest``: pointers to the run's waveform folders,
@@ -19,6 +21,7 @@ the latest CSV, so a sidecar left by an earlier GUI run described its results.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
@@ -86,10 +89,14 @@ def save_run(df, stim, *, out_dir: str | os.PathLike[str], duration_s: float | N
     write_analysis_pointers(analysis_dirs, out_dir)
 
     s = _dl.result_summary(_dl.prepare_results(df))
+    source = getattr(stim, "source_bytes", b"") or b""
     meta = dict(yaml_name=yaml_name, duration_s=duration_s, total_runs=s.total,
                 valid_runs=s.valid, global_yield=round(s.yield_pct, 2),
                 tran_dir=analysis_dirs.get("transient", ""),
-                analysis_dirs=analysis_dirs)
+                analysis_dirs=analysis_dirs,
+                datasheet_sha256=hashlib.sha256(source).hexdigest() if source else "",
+                settings=df.attrs.get("run_settings") or {},
+                engines=df.attrs.get("engines") or {})
 
     history_csv: Path | None = None
     history_error = ""
@@ -99,6 +106,10 @@ def save_run(df, stim, *, out_dir: str | os.PathLike[str], duration_s: float | N
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         history_csv = history_dir / f"run_{ts}.csv"
         df.to_csv(history_csv, index=False)
+        if source:
+            snapshot = history_dir / f"run_{ts}.datasheet.yaml"
+            snapshot.write_bytes(source)
+            meta["datasheet_snapshot"] = str(snapshot)
         meta["templates_dir"] = _archive_templates(
             stim, history_dir / f"run_{ts}_templates")
     except Exception as exc:  # noqa: BLE001 — the latest CSV is already safe

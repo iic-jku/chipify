@@ -28,6 +28,10 @@ class Stimuli:
         # travels with results loaded from it, so a report names the datasheet
         # of the run on screen rather than whichever one is selected now.
         self.yaml_path: str = str(yaml_file) if yaml_file else ""
+        # The exact bytes it was parsed from (b"" when built in code). A run
+        # records them, so its results trace back to the datasheet as it was
+        # when the run started, not as it reads after later edits.
+        self.source_bytes: bytes = b""
         self.params: dict[str, Any] = {}
         self.tests: list[Test] = []
         # One-line ``description:`` — report cover and batch summary page.
@@ -52,7 +56,9 @@ class Stimuli:
           via a strict AST whitelist — no eval() involved.
         - validates structural correctness and reports precise error paths.
         """
-        data = yaml.safe_load(Path(file_path).read_text(encoding="utf-8"))
+        raw = Path(file_path).read_bytes()
+        data = yaml.safe_load(raw.decode("utf-8"))
+        self.source_bytes = raw
 
         from chipify.schema import validate_datasheet, SchemaError
         try:

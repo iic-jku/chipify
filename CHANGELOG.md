@@ -14,6 +14,11 @@ Preparation for the initial public release.
   `--out DIR` replaces the output folder (results, history, waveforms,
   reports and `chipify.log`), and `--only PATTERN` (repeatable, matching a
   datasheet's file name or stem) runs only some datasheets of a `--batch`.
+- Run sidecars (`*.meta.json`) record what produced the run: the chipify
+  version and the folder it ran from, the datasheet's SHA-256 and a copy of it
+  as parsed (`history/run_<ts>.datasheet.yaml`), the run's settings as its
+  workers used them, and each testbench's engine. `git_commit` remains the
+  commit of the project folder, not of chipify.
 - `chipify-cli --batch DIR --reports` writes one combined PDF,
   `out/reports/<timestamp>/batch_report_<timestamp>.pdf`: a summary page with
   one row per datasheet (runs, valid, passed, yield, time, start page), the

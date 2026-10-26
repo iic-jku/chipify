@@ -142,6 +142,20 @@ def test_cli_runs_archive_their_netlist_templates(project, monkeypatch, capsys):
         assert (templates / "tb.spice").read_text(encoding="utf-8") == "* tb {{ temp }}\n"
 
 
+def test_a_cli_run_records_the_datasheet_it_ran(project, monkeypatch, capsys):
+    import hashlib
+
+    from chipify import run_meta
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    source = (project["batch"] / "alpha.yaml").read_bytes()
+    (project["batch"] / "alpha.yaml").write_text("edited later\n", encoding="utf-8")
+    root = project["out"] / "alpha"
+    meta = run_meta.read_meta(next((root / "history").glob("run_*.csv")))
+    assert meta["datasheet_sha256"] == hashlib.sha256(source).hexdigest()
+    assert (root / meta["datasheet_snapshot"]).read_bytes() == source
+
+
 def test_latest_results_get_their_own_sidecar(project, monkeypatch, capsys):
     """The CLI rewrote simulation_results.csv but left the sidecar of an
     earlier GUI run next to it, so the new results resolved to that run's

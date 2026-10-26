@@ -112,8 +112,10 @@ chipify-cli -c my_design.yaml --markdown report.md
 ```
 
 Results are written to the output folder (`out/` by default), including
-`simulation_results.csv` and any generated reports. Run `chipify-cli --help`
-for the full list of options.
+`simulation_results.csv` and any generated reports. Every run is also kept in
+`history/` with a `.meta.json` sidecar recording what produced it (chipify
+version, the datasheet's hash and a copy of it, the settings and engines used).
+Run `chipify-cli --help` for the full list of options.
 
 In batch mode each datasheet gets its own folder, `out/<datasheet>/` (results,
 `history/`, waveforms in `analysis_data/`, `reports/`). With `--reports` the batch

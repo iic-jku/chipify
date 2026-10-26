@@ -965,6 +965,9 @@ def run_sim(stim, progress_callback=None, simulator=None, chunk_callback=None,
         _log_capture_failures(results)
 
         result_df = _assemble_result_df(results, analysis_dirs)
+        # What produced these results, for the run's sidecar (run_store).
+        result_df.attrs["run_settings"] = run_cfg
+        result_df.attrs["engines"] = {t.tb_path: t.engine for t in stim.tests}
         return result_df
 
     except InterruptedError:

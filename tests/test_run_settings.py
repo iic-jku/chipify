@@ -136,3 +136,8 @@ def test_overrides_reach_every_worker_process(tmp_path, monkeypatch, start_metho
     assert list(df["timeout"]) == [123.0] * 4
     assert df["pid"].nunique() == 1           # --cores 1: one worker process
     assert int(df["pid"].iloc[0]) != os.getpid()
+    # The settings the workers used travel to the run's sidecar.
+    settings = df.attrs["run_settings"]
+    assert (settings["sim_timeout_sec"], settings["num_cores"]) == (123.0, 1)
+    assert (settings["process_start_method"], settings["chunk_size"]) == (start_method, 1)
+    assert df.attrs["engines"] == {"tb": "timeoutecho"}
