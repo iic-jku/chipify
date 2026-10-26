@@ -263,6 +263,22 @@ def test_generate_templates_missing_import_isolates_failure(
     assert "netlist generation failed" in (miss.template_error or "")
 
 
+def test_rendered_netlist_keeps_its_final_newline() -> None:
+    """Jinja2 dropped a template's last newline, so a native VACASK deck
+    ending in `endc` and one newline failed with a syntax error at EOF."""
+    seen = []
+
+    class _Recording(_FakeEngine):
+        def run(self, netlist, timeout_sec=10, test=None, analysis_tab_paths=None):
+            seen.append(netlist)
+            return self._output, None
+
+    test = _make_test("tb_x", ["v"])
+    test.template_str = "analysis op1 op vdd={{ vdd }}\nendc\n"
+    simulator._simulate_single_case_with_engine({"vdd": 1.8}, [test], _Recording("MY_DATA: 1"))
+    assert seen == ["analysis op1 op vdd=1.8\nendc\n"]
+
+
 def test_template_render_error_fails_only_that_testbench() -> None:
     """A StrictUndefined render error (e.g. param-name typo in the testbench)
     must fail that testbench's row — not blow up the whole worker batch."""

@@ -34,6 +34,12 @@ class _FakeTest:
         self.analyses = [_FakeAnalysis()]
 
 
+def test_render_keeps_the_final_newline() -> None:
+    """Jinja2 dropped it, and VACASK rejects a deck that ends without one."""
+    test = _FakeTest("analysis op1 op\nendc\n")
+    assert netlist_export.render_netlist_for_row(test, {}, "000001").endswith("endc\n")
+
+
 def test_render_substitutes_params_and_tab_paths() -> None:
     test = _FakeTest("Vdd vdd 0 {{ vdd }}\nwrdata {{ tran_out_path }} out\n")
     row = {"vdd": 1.8, "temp": 27, "gain": 42.0}

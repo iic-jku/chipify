@@ -29,12 +29,11 @@ from multiprocessing import active_children, current_process, get_context
 
 import pandas as pd
 from tqdm import tqdm
-from jinja2 import Template, StrictUndefined
-
 from chipify import settings
 from chipify import util
 from chipify import app_config
 from chipify import data_loader as _dl
+from chipify.templating import render_netlist
 
 # ── Engine API (re-exported for backward compatibility) ──────────────────────
 from chipify.engines import (  # noqa: F401
@@ -345,14 +344,12 @@ def _simulate_single_case(params, tests, engine_for,
             render_kwargs[an.jinja_var()] = tab
             analysis_tab_paths[an.kind] = tab
 
-        # StrictUndefined raises on any placeholder the case's parameters
+        # render_netlist raises on any placeholder the case's parameters
         # don't cover (e.g. a param-name typo in the testbench). That must
         # fail this testbench's row — an uncaught exception here would lose
         # the entire worker batch with only a main-process log line.
         try:
-            rendering = Template(
-                test.template_str, undefined=StrictUndefined,
-            ).render(**render_kwargs)
+            rendering = render_netlist(test.template_str, render_kwargs)
         except Exception as exc:  # noqa: BLE001
             _fail_test(sample, test,
                        f"{test.tb_path}: TEMPLATE_RENDER_ERROR: {exc}")

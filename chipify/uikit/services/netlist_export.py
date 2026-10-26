@@ -3,9 +3,9 @@
 netlist_export.py – Export the rendered SPICE netlist for one Monte-Carlo
 sample (scatter-plot point), with that sample's parameter values filled in.
 
-Rendering mirrors simulator._simulate_single_case_with_engine(): the
-testbench's Jinja2 template is rendered with the sample's parameter dict plus
-one ``<kind>_out_path`` variable per declared analysis.
+Rendering is the simulator's own (:func:`chipify.templating.render_netlist`):
+the testbench's Jinja2 template is rendered with the sample's parameter dict
+plus one ``<kind>_out_path`` variable per declared analysis.
 
 Templates are persisted per run via :func:`persist_templates` (referenced by
 the run's ``.meta.json`` ``templates_dir`` field) using the same file naming
@@ -20,9 +20,8 @@ import logging
 import os
 from pathlib import Path
 
-from jinja2 import StrictUndefined, Template
-
 from chipify import app_config, settings
+from chipify.templating import render_netlist
 
 log = logging.getLogger("chipify.uikit.netlist_export")
 
@@ -130,4 +129,4 @@ def render_netlist_for_row(test, row_dict: dict, run_id: str,
     for an in getattr(test, "analyses", []) or []:
         # Stand-in output paths for the wrdata targets of the original run.
         ctx[an.jinja_var()] = f"run_{run_id}_{an.kind}.tab"
-    return Template(text, undefined=StrictUndefined).render(ctx)
+    return render_netlist(text, ctx)

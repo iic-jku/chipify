@@ -90,6 +90,11 @@ Preparation for the initial public release.
   An explicit `work_dir` in `settings.json` keeps working unchanged.
 
 ### Fixed
+- A native VACASK deck ending in the usual single newline crashed every run
+  with "Parser syntax error, unexpected end of file, expecting newline":
+  Jinja2 removed the template's final newline when rendering. Rendering now
+  keeps it, in the simulation and in the per-sample netlist export alike.
+  The extra blank line some decks carried as a workaround is no longer needed.
 - VACASK `measure:` expressions on AC data used only the real part of every
   complex vector: `last(abs(vout))` of an RC filter at 1 MHz gave 2.5e-6
   instead of 1.6e-3, and its phase read 0°. Complex vectors now stay complex
