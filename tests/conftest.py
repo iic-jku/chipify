@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -45,3 +46,19 @@ def _no_tool_version_probes(monkeypatch):
     """
     for probe in ("_ngspice_version", "_vacask_version", "_git_commit"):
         monkeypatch.setattr(run_meta, probe, lambda: "")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_forkserver():
+    """Stop the forkserver after each test.
+
+    Pool workers are forked from one forkserver per process, so they see its
+    environment from when it started, not the current test's. Tests hand their
+    workers a plugin engine through CHIPIFY_PLUGINS; the first forkserver test's
+    directory reached every later one ("Unknown simulator engine 'timeoutecho';
+    available: ngspice, vacask, interruptible", Linux CI only).
+    """
+    yield
+    if sys.platform.startswith("linux"):
+        from multiprocessing import forkserver
+        forkserver._forkserver._stop()
