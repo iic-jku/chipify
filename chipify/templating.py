@@ -21,6 +21,9 @@ def render_netlist(template: str, values: Mapping[str, Any]) -> str:
     drops a template's final newline by default, and VACASK rejects a deck
     whose last line has no newline with a syntax error at end of file.
     """
-    return Template(
+    # Jinja2 types Template() as Any, so the annotation keeps strict mypy's
+    # no-any-return quiet (newer mypy reports it, 1.14 did not).
+    rendered: str = Template(
         template, undefined=StrictUndefined, keep_trailing_newline=True,
     ).render(dict(values))
+    return rendered
