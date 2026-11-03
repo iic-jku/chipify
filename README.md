@@ -108,6 +108,7 @@ chipify-cli --batch ./datasheets       # run every *.yaml in a directory
 chipify-cli --batch ./datasheets --reports      # ...plus one combined PDF for all of them
 chipify-cli --batch ./datasheets --report-only  # rebuild the reports from finished runs
 chipify-cli -c my_design.yaml --json   # also print a JSON summary (handy for CI)
+chipify-cli --batch ./datasheets --strict       # fail the exit code on FAIL/ERROR cases
 chipify-cli -c my_design.yaml --markdown report.md
 ```
 
@@ -125,6 +126,16 @@ start page), each datasheet's `description:` and its failing measurements,
 followed by every datasheet's own report, with one bookmark per datasheet.
 `--report-only` rebuilds all of this from each datasheet's newest finished run
 without simulating, for example after editing the `reports:` blocks.
+
+The exit code is 0 when every datasheet ran, whatever the yield, and 1 when
+one could not run (a fatal error, an abort, no finished run for
+`--report-only`). `--strict` also judges the results, for a CI job or a
+Makefile check target: exit code 3 when a case is out of spec, 4 when a case
+gave an ERROR (no trustworthy value, outranks 3), with one line per datasheet
+saying how many cases. 1 still outranks both, and 2 is a rejected command
+line. It is opt-in because a Monte Carlo run is often meant to show failing
+samples. With `--report-only` the finished runs are judged against the
+datasheet's current limits.
 
 Settings can be changed for one invocation without editing `settings.json`,
 for example on a compute server:

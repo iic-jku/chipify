@@ -600,6 +600,115 @@ def test_a_batch_that_ran_to_the_end_is_not_resumed(project, monkeypatch, capsys
     assert "Nothing to resume" in capsys.readouterr().out
 
 
+# ── --strict ──────────────────────────────────────────────────────────────────
+
+def _out_of_spec() -> pd.DataFrame:
+    """_results() with the -40 °C case at 12 dB, above the 11 dB maximum."""
+    df = _results()
+    df.loc[0, ["gain", "gain_pass", "tb_overall_pass"]] = [12.0, False, False]
+    return df
+
+
+def _errored() -> pd.DataFrame:
+    """_results() with the 100 °C case crashed, so it has no value at all."""
+    df = _results()
+    crash = "CRASH: ngspice exit code 1: Error: no such vector"
+    df.loc[2, ["sim_error", "tb__error"]] = [crash, crash]
+    df.loc[2, ["gain", "gain_pass", "tb_overall_pass"]] = [float("nan"), False, False]
+    return df
+
+
+def _results_by_stem(monkeypatch, **factories):
+    """Replace run_sim: each datasheet stem gets its factory's results."""
+    from chipify import simulator
+
+    def run_sim(stim, *, out_dir=None, **_kw):
+        df = factories.get(Path(stim.yaml_path).stem, _results)()
+        df.attrs["analysis_dirs"] = simulator._create_analysis_dirs(stim, out_dir)
+        return df
+
+    monkeypatch.setattr(simulator, "run_sim", run_sim)
+
+
+def test_without_strict_failing_cases_still_exit_0(project, monkeypatch, capsys):
+    """Judging is opt-in: a Monte Carlo run is often meant to fail some samples."""
+    _results_by_stem(monkeypatch, alpha=_out_of_spec, beta=_errored)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    assert code == 0
+
+
+@pytest.mark.parametrize("alpha, beta, expected", [
+    (_results, _results, 0),
+    (_out_of_spec, _results, 3),
+    (_results, _errored, 4),
+    (_errored, _out_of_spec, 4),          # ERROR outranks FAIL, in either order
+])
+def test_strict_judges_the_results_in_the_exit_code(
+        project, monkeypatch, capsys, alpha, beta, expected):
+    """chipify-cli exited 0 for a batch below 100 % yield, so a Makefile's
+    check target could not tell it from a clean one."""
+    _results_by_stem(monkeypatch, alpha=alpha, beta=beta)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]), "--strict")
+    assert code == expected
+
+
+def test_strict_keeps_1_for_a_datasheet_that_did_not_run(project, monkeypatch, capsys):
+    from chipify import simulator
+
+    _results_by_stem(monkeypatch, alpha=_out_of_spec)
+    real = simulator.run_sim
+
+    def beta_fails(stim, **kw):
+        if Path(stim.yaml_path).stem == "beta":
+            raise RuntimeError("no netlist")
+        return real(stim, **kw)
+
+    monkeypatch.setattr(simulator, "run_sim", beta_fails)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]), "--strict")
+    assert code == 1
+
+
+def test_strict_single_run_names_what_failed(project, monkeypatch, capsys):
+    _single(project, monkeypatch)
+    _results_by_stem(monkeypatch, alpha=_out_of_spec)
+    monkeypatch.setattr(sys, "argv", ["chipify-cli", "-c", "alpha.yaml", "--strict"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 3
+    assert "alpha.yaml: 1 of 3 case(s) out of spec" in capsys.readouterr().out
+
+
+def test_strict_report_only_judges_against_the_current_limits(project, monkeypatch, capsys):
+    """A finished run can be gated again after its limits were edited."""
+    from chipify import simulator
+
+    _main(monkeypatch, capsys, "--batch", str(project["batch"]))
+    alpha = project["batch"] / "alpha.yaml"
+    alpha.write_text(alpha.read_text(encoding="utf-8").replace("max: 11", "max: 10.1"),
+                     encoding="utf-8")
+
+    def must_not_run(*_a, **_k):
+        raise AssertionError("--report-only must not simulate")
+
+    monkeypatch.setattr(simulator, "run_sim", must_not_run)
+    code, _ = _main(monkeypatch, capsys, "--batch", str(project["batch"]),
+                    "--report-only", "--strict")
+    assert code == 3
+
+
+def test_strict_does_not_pass_a_run_without_cases(capsys):
+    """passed == total == 0 is no yield, the vacuous PASS of 0.2.3 again."""
+    empty = {"yaml": "empty.yaml", "total": 0, "passed": 0, "crashes": 0}
+    assert cli._strict_exit_code([empty]) == cli.EXIT_SPEC_FAIL
+
+
+@pytest.mark.parametrize("mode", [("--preflight",), ("--case", "0")])
+def test_strict_needs_results_to_judge(project, monkeypatch, capsys, mode):
+    code, _ = _main(monkeypatch, capsys, "-c", "alpha.yaml", *mode, "--strict")
+    assert code == 2
+    assert project["calls"] == []
+
+
 def test_order_datasheets_accepts_names_and_stems(tmp_path, caplog):
     from chipify import project_config
 

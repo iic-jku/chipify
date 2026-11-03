@@ -12,6 +12,32 @@ from chipify import settings
 from chipify import simulator
 from chipify.analyzer import print_summary
 
+# Exit codes. 2 is argparse's, for a command line it rejects.
+EXIT_RUN_FAILED = 1   # a datasheet could not be run, loaded or checked
+EXIT_SPEC_FAIL = 3    # --strict: a case is out of spec
+EXIT_CASE_ERROR = 4   # --strict: a case gave no trustworthy value (ERROR)
+
+
+def _strict_exit_code(summaries: list[dict]) -> int:
+    """``--strict``'s exit code for finished runs, from their summary lines.
+
+    Without --strict a run that simulated exits 0 whatever its yield, so a
+    Makefile or CI job could not tell a clean datasheet from a failing one.
+    ERROR outranks FAIL: an errored case has no value to judge. A run with no
+    cases is no pass either. The counts are the ones the summary line prints.
+    """
+    code = 0
+    for s in summaries:
+        total, passed, errored = s.get("total", 0), s.get("passed", 0), s.get("crashes", 0)
+        if errored:
+            print(f"[-] --strict: {s['yaml']}: {errored} of {total} case(s) gave an ERROR")
+            code = EXIT_CASE_ERROR
+        elif passed < total or not total:
+            print(f"[-] --strict: {s['yaml']}: {total - passed} of {total} case(s) "
+                  f"out of spec")
+            code = code or EXIT_SPEC_FAIL
+    return code
+
 
 def _json_summary(df, yaml_name: str, duration_s: float) -> dict:
     """Return a machine-readable summary dict for the completed run."""
@@ -553,6 +579,17 @@ def main():
     )
 
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Judge the results in the exit code: 3 when a case is out of\n"
+            "spec, 4 when a case gave an ERROR (no trustworthy value).\n"
+            "Without it the exit code is 0 whenever every datasheet ran.\n"
+            "1 (a datasheet could not run) outranks both."
+        ),
+    )
+
+    parser.add_argument(
         "--progress-stream",
         action="store_true",
         default=False,
@@ -579,7 +616,8 @@ def main():
         clash = [flag for flag, on in (("--resume", args.resume),
                                        ("--report-only", args.report_only),
                                        ("--reports", args.reports),
-                                       ("--markdown", args.markdown)) if on]
+                                       ("--markdown", args.markdown),
+                                       ("--strict", args.strict)) if on]
         if clash:
             parser.error(f"{'--preflight' if args.preflight else '--case'} writes no "
                          f"results, so {clash[0]} does not apply")
@@ -725,7 +763,9 @@ def main():
         if args.json:
             print(json.dumps(batch_line))
 
-        sys.exit(0 if all_ok else 1)
+        if not all_ok:
+            sys.exit(EXIT_RUN_FAILED)
+        sys.exit(_strict_exit_code(summaries) if args.strict else 0)
 
     # ── Single run ────────────────────────────────────────────────────────────
     yaml_path = Path(settings.IN_DIR) / args.config
@@ -750,6 +790,9 @@ def main():
     # Optional Markdown report
     if args.markdown:
         _write_markdown(entry, args.markdown)
+
+    if args.strict:
+        sys.exit(_strict_exit_code([entry.summary]))
 
 if __name__ == "__main__":
     main()

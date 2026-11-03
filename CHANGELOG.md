@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Preparation for the initial public release.
 
 ### Added
+- `chipify-cli --strict` puts the verdict into the exit code: 3 when a case
+  is out of spec, 4 when a case gave an ERROR (outranks 3), for CI jobs and
+  Makefile check targets. Without it the exit code stays 0 whenever every
+  datasheet ran, even below 100 % yield, because a Monte Carlo run often fails
+  samples on purpose. 1 (a datasheet could not run) outranks both.
 - `chipify-cli --preflight` checks a datasheet (or a `--batch`) without
   simulating: case count, each testbench's engine, its netlist and the
   rendering of the first case; exit code 1 when anything would fail.
