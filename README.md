@@ -10,7 +10,7 @@
 
 Institute for Integrated Circuits and Quantum Computing, Johannes Kepler University (JKU), Linz, Austria
 
-[Link to repository](https://github.com/santihofi/chipify/)
+[Link to repository](https://github.com/iic-jku/chipify/)
 
 [Link to Youtube Channel (tutorials following soon)](https://www.youtube.com/@chipify-eda)
 
@@ -97,9 +97,9 @@ and explore results interactively.
 
 ### Headless CLI
 
-See [`examples/datasheet.yaml`](examples/datasheet.yaml) for a documented
-datasheet template (and [examples/README.md](examples/README.md) for how to run
-it). Place your datasheet YAML in the input folder (`datasheets/` by default), then:
+See the [chipify-examples](https://github.com/iic-jku/chipify-examples)
+repository for documented example datasheets and how to run them. Place your
+datasheet YAML in the input folder (`datasheets/` by default), then:
 
 ```bash
 chipify-cli -c my_design.yaml          # run a single datasheet
@@ -294,7 +294,7 @@ takes precedence over a per-testbench `source: netlist`.
 
 ## Running the examples
 
-The examples for chipify can be found [here](https://github.com/santihofi/chipify-examples)
+The examples for chipify can be found [here](https://github.com/iic-jku/chipify-examples)
 
 ## Project layout
 

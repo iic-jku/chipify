@@ -18,7 +18,7 @@ setup(
     long_description_content_type="text/markdown",
     author="Santiago Hofwimmer",
     author_email="santiago.hofwimmer2@gmail.com",
-    url="https://github.com/santihofi/chipify",
+    url="https://github.com/iic-jku/chipify",
     license="Apache-2.0",
     python_requires=">=3.11",
     packages=find_packages(exclude=["tests", "tests.*"]),
