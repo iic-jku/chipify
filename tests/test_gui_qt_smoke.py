@@ -957,15 +957,52 @@ def test_autosave_for_run_cancels_on_invalid_yaml(qt_app, tmp_path, monkeypatch)
     try:
         win.set_active_datasheet("demo.yaml")
         ed = win.editor_tab
-        # Type invalid YAML in raw mode (block the mode-change signal so the
-        # raw editor isn't repopulated from state).
-        ed.mode_combo.blockSignals(True)
+        # Switch to the raw view, then type invalid YAML there.
         ed.mode_combo.setCurrentText("Raw YAML")
-        ed.mode_combo.blockSignals(False)
+        ed._on_mode_change()
         ed.raw_editor.setPlainText("parameters: [unbalanced")
         # Run must be canceled and the file left untouched.
         assert ed.autosave_for_run(ed.current_yaml_path) is False
         assert ds.read_text() == original
+    finally:
+        win.close()
+
+
+_LOSSY = (
+    "# Load sweep\n"
+    "parameters:\n  cload: [1.0e-14, 5.0e-14]  # F\n"
+    "tests:\n  tb:\n    freq:\n      min: 2.1e9\n      unit: Hz\n"
+)
+
+
+@pytest.mark.parametrize("mode", ["Form View", "Raw YAML"])
+def test_autosave_for_run_leaves_an_untouched_datasheet_alone(
+        qt_app, tmp_path, monkeypatch, mode):
+    """The form's round trip changes this datasheet (comments dropped,
+    1.0e-14 written as 1e-14, which loads back as a string), so the pre-run
+    save used to rewrite it on every Run although nothing was edited."""
+    from chipify import settings
+    monkeypatch.setattr(settings, "IN_DIR", str(tmp_path))
+    ds = tmp_path / "lossy.yaml"
+    ds.write_bytes(_LOSSY.replace("\n", "\r\n").encode("utf-8"))
+    before = ds.read_bytes()
+
+    from chipify.gui_qt.main_window import MainWindow
+    win = MainWindow()
+    try:
+        win.set_active_datasheet("lossy.yaml")
+        ed = win.editor_tab
+        ed.mode_combo.setCurrentText(mode)
+        ed._on_mode_change()
+        assert ed.autosave_for_run(ed.current_yaml_path) is True
+        assert ds.read_bytes() == before
+        # An edit is still saved before the run.
+        if mode == "Form View":
+            ed.desc_edit.setText("edited")
+        else:
+            ed.raw_editor.setPlainText(_LOSSY.replace("2.1e9", "3.0e9"))
+        assert ed.autosave_for_run(ed.current_yaml_path) is True
+        assert ds.read_bytes() != before
     finally:
         win.close()
 

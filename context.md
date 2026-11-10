@@ -202,6 +202,7 @@ A declared analysis (`transient/dc/ac_signals`) that produced no waveform CSV is
 *   Loading a datasheet rereads the file, so `MainWindow._on_datasheet_changed` and **New…** call `editor_tab.confirm_unsaved_changes()` first (Save / Discard / Cancel; Cancel puts the selector back on the open datasheet).
 *   `has_unsaved_changes()` compares the visible view (form data or raw text) with `_clean_snapshot`, **not** with the file: the form's own round trip changes untouched values (`1.0e-14` comes back as the string `'1e-14'`, a bound written `2.1e9` as a float), which flagged real datasheets as edited right after loading.
 *   **Every path that writes the datasheet or reloads it calls `_mark_clean()`** (load, `_save`, `set_document_key`, `autosave_for_run`), and a Form/Raw switch re-baselines only when the editor was clean before it. A new writer without it makes the prompt fire after a save.
+*   `autosave_for_run` (the save before a GUI run) writes only when `has_unsaved_changes()` is True. Comparing "what Save would write" with the file rewrote untouched datasheets on every Run because of that same round trip, dropping comments and turning `1.0e-14` into a string.
 
 ### Editing `reports:` from the GUI (`gui_qt/widgets/reports_dialog.py`)
 *   Opened by **Reports…** in the Datasheet Editor toolbar, because the block belongs to the datasheet — chipify's paradigm is that a datasheet is fully buildable from the GUI.

@@ -20,6 +20,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   puts the selector back. Saving first also puts the edits into a New… copy
   of the open datasheet. Switching between Form View and Raw YAML is not
   counted as an edit, so an untouched datasheet never asks.
+- Starting a run from the GUI rewrote the selected datasheet even when nothing
+  had been edited, whenever the editor would save it differently from the
+  file. For some datasheets that is always so: the rewrite dropped every
+  comment and wrote a sweep value such as `1.0e-14` as `1e-14`, which YAML
+  reads back as text, not a number. The save before a run now only writes
+  when there are unsaved edits.
 
 ## [0.2.3] - 2026-11-09
 

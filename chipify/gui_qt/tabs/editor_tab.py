@@ -715,12 +715,19 @@ class DatasheetEditorTab(QWidget):
 
         Called by the simulation controller before a run so the sweep uses what
         the user currently sees in the editor. Returns True when it's safe to
-        proceed — saved, unchanged, or the editor isn't showing *yaml_path*.
-        Returns False only when the current content is invalid (e.g. malformed
-        raw YAML), so the caller can cancel rather than silently run stale data.
+        proceed — saved, nothing edited, or the editor isn't showing
+        *yaml_path*. Returns False only when the current content is invalid
+        (e.g. malformed raw YAML), so the caller can cancel rather than
+        silently run stale data.
         """
         if not self.current_yaml_path or self.current_yaml_path != yaml_path:
             return True  # editor isn't showing the datasheet being run
+        if not self.has_unsaved_changes():
+            # The file already holds what the view shows. Writing "what Save
+            # would write" here rewrote untouched datasheets on every Run: the
+            # form's round trip is lossy for some (comments dropped, a sweep
+            # value 1.0e-14 written as 1e-14, which YAML 1.1 reads as a string).
+            return True
         try:
             text = self._compute_save_text()
         except Exception as exc:  # noqa: BLE001
