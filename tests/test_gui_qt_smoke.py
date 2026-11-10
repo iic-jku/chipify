@@ -1043,6 +1043,217 @@ def test_new_datasheet_blank_still_uses_template(qt_app, tmp_path, monkeypatch):
         win.close()
 
 
+_DS_A = ("# keep this comment\n"
+         "parameters:\n  temp: [27]\n"
+         "tests:\n  tb_sf:\n    gain:\n      min: 0.8\n      max: 1.0\n")
+_DS_B = "parameters:\n  temp: [85]\ntests:\n  tb_b:\n    v:\n      max: 2.0\n"
+
+
+def _editor_on_a_with_b(tmp_path, monkeypatch, answer=None):
+    """A window editing a.yaml next to b.yaml; QMessageBox.question answers
+    *answer* and records the call (None: fail if the prompt appears)."""
+    from chipify import settings
+    from chipify.gui_qt.tabs import editor_tab as _et
+    monkeypatch.setattr(settings, "IN_DIR", str(tmp_path))
+    (tmp_path / "a.yaml").write_text(_DS_A, encoding="utf-8")
+    (tmp_path / "b.yaml").write_text(_DS_B, encoding="utf-8")
+    asked: list = []
+
+    def _question(*a, **k):
+        assert answer is not None, "unexpected unsaved-changes prompt"
+        asked.append(a[2])
+        return answer
+    monkeypatch.setattr(_et.QMessageBox, "question", _question)
+    from chipify.gui_qt.main_window import MainWindow
+    win = MainWindow()
+    win.set_active_datasheet("a.yaml")
+    return win, asked
+
+
+def _pick(win, name):
+    """What choosing *name* in the selector does: the combo moves first."""
+    win.datasheet_combo.setCurrentText(name)
+    win._on_datasheet_changed(name)
+
+
+def test_switch_with_unsaved_edits_cancel_keeps_them(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Cancel)
+    try:
+        ed = win.editor_tab
+        ed.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        _pick(win, "b.yaml")
+        assert asked and "a.yaml" in asked[0]
+        assert ed.current_yaml_path == str(tmp_path / "a.yaml")
+        assert ed.test_vars[0]["values"][0]["vmax"].get() == "1.5"   # edit kept
+        assert win.datasheet_combo.currentText() == "a.yaml"         # selector back
+        assert (tmp_path / "a.yaml").read_text(encoding="utf-8") == _DS_A
+    finally:
+        win.close()
+
+
+def test_switch_with_unsaved_edits_discard_loads_other(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Discard)
+    try:
+        win.editor_tab.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        _pick(win, "b.yaml")
+        assert asked
+        assert win.editor_tab.current_yaml_path == str(tmp_path / "b.yaml")
+        assert (tmp_path / "a.yaml").read_text(encoding="utf-8") == _DS_A
+    finally:
+        win.close()
+
+
+def test_switch_with_unsaved_edits_save_writes_them(qt_app, tmp_path, monkeypatch):
+    import yaml as _yaml
+    from PySide6.QtWidgets import QMessageBox
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Save)
+    try:
+        win.editor_tab.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        _pick(win, "b.yaml")
+        assert asked
+        saved = _yaml.safe_load((tmp_path / "a.yaml").read_text(encoding="utf-8"))
+        assert saved["tests"]["tb_sf"]["gain"]["max"] == 1.5
+        assert win.editor_tab.current_yaml_path == str(tmp_path / "b.yaml")
+    finally:
+        win.close()
+
+
+def test_switch_stays_when_the_save_fails(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from chipify.gui_qt.tabs import editor_tab as _et
+    win, _ = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Save)
+    monkeypatch.setattr(_et.QMessageBox, "critical", lambda *a, **k: None)
+    try:
+        ed = win.editor_tab
+        ed.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+
+        def _fail():
+            raise OSError("disk full")
+        monkeypatch.setattr(ed, "_compute_save_text", _fail)
+        _pick(win, "b.yaml")
+        assert ed.current_yaml_path == str(tmp_path / "a.yaml")
+        assert win.datasheet_combo.currentText() == "a.yaml"
+    finally:
+        win.close()
+
+
+def test_switch_without_edits_does_not_ask(qt_app, tmp_path, monkeypatch):
+    win, _ = _editor_on_a_with_b(tmp_path, monkeypatch, answer=None)
+    try:
+        ed = win.editor_tab
+        # Mode switches convert the content but are not edits.
+        ed.mode_combo.setCurrentText("Raw YAML")
+        ed._on_mode_change()
+        ed.mode_combo.setCurrentText("Form View")
+        ed._on_mode_change()
+        _pick(win, "b.yaml")
+        assert ed.current_yaml_path == str(tmp_path / "b.yaml")
+    finally:
+        win.close()
+
+
+def test_form_round_trip_alone_is_not_an_edit(qt_app, tmp_path, monkeypatch):
+    """The form turns a sweep value 1.0e-14 into the string '1e-14' and a
+    bound written 2.1e9 (a string to YAML 1.1) into a float; comparing against
+    the file flagged such datasheets right after loading (found in 3 of 150
+    real datasheets)."""
+    win, _ = _editor_on_a_with_b(tmp_path, monkeypatch, answer=None)
+    try:
+        (tmp_path / "c.yaml").write_text(
+            "parameters:\n  cload: [1.0e-14, 5.0e-14]\n"
+            "tests:\n  tb:\n    freq:\n      min: 2.1e9\n      unit: Hz\n",
+            encoding="utf-8")
+        win.set_active_datasheet("c.yaml")
+        ed = win.editor_tab
+        assert not ed.has_unsaved_changes()
+        ed.mode_combo.setCurrentText("Raw YAML")
+        ed._on_mode_change()
+        assert not ed.has_unsaved_changes()
+        _pick(win, "b.yaml")                       # no prompt
+        assert ed.current_yaml_path == str(tmp_path / "b.yaml")
+    finally:
+        win.close()
+
+
+def test_raw_edits_count_and_survive_a_mode_switch(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Cancel)
+    try:
+        ed = win.editor_tab
+        ed.mode_combo.setCurrentText("Raw YAML")
+        ed._on_mode_change()
+        assert not ed.has_unsaved_changes()
+        ed.raw_editor.setPlainText(_DS_A.replace("max: 1.0", "max: 3.0"))
+        assert ed.has_unsaved_changes()
+        ed.mode_combo.setCurrentText("Form View")
+        ed._on_mode_change()
+        assert ed.has_unsaved_changes()            # still unsaved after the switch
+        _pick(win, "b.yaml")
+        assert asked and ed.current_yaml_path == str(tmp_path / "a.yaml")
+    finally:
+        win.close()
+
+
+def test_saving_clears_the_unsaved_state(qt_app, tmp_path, monkeypatch):
+    win, _ = _editor_on_a_with_b(tmp_path, monkeypatch, answer=None)
+    try:
+        ed = win.editor_tab
+        ed.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        assert ed.has_unsaved_changes()
+        ed._save()
+        assert not ed.has_unsaved_changes()
+        ed.test_vars[0]["values"][0]["vmax"]._w.setText("1.7")
+        assert ed.autosave_for_run(ed.current_yaml_path)
+        assert not ed.has_unsaved_changes()
+        _pick(win, "b.yaml")                       # no prompt
+    finally:
+        win.close()
+
+
+def test_new_from_the_open_datasheet_can_save_its_edits_first(qt_app, tmp_path, monkeypatch):
+    import yaml as _yaml
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    from chipify.gui_qt.widgets import new_datasheet_dialog as _nd
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Save)
+
+    def _copy_a(self):
+        self.name_edit.setText("a_quick")
+        self.source_combo.setCurrentText("a.yaml")
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(_nd.NewDatasheetDialog, "exec", _copy_a)
+    try:
+        win.editor_tab.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        win.editor_tab._action_new()
+        assert asked
+        copy = _yaml.safe_load((tmp_path / "a_quick.yaml").read_text(encoding="utf-8"))
+        assert copy["tests"]["tb_sf"]["gain"]["max"] == 1.5
+        assert win.editor_tab.current_yaml_path == str(tmp_path / "a_quick.yaml")
+    finally:
+        win.close()
+
+
+def test_new_cancelled_at_the_prompt_creates_nothing(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    from chipify.gui_qt.widgets import new_datasheet_dialog as _nd
+    win, asked = _editor_on_a_with_b(tmp_path, monkeypatch, QMessageBox.Cancel)
+
+    def _blank(self):
+        self.name_edit.setText("fresh")
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(_nd.NewDatasheetDialog, "exec", _blank)
+    try:
+        win.editor_tab.test_vars[0]["values"][0]["vmax"]._w.setText("1.5")
+        win.editor_tab._action_new()
+        assert asked
+        assert not (tmp_path / "fresh.yaml").exists()
+        assert win.editor_tab.current_yaml_path == str(tmp_path / "a.yaml")
+        assert win.editor_tab.test_vars[0]["values"][0]["vmax"].get() == "1.5"
+    finally:
+        win.close()
+
+
 def test_run_summary_updates(window):
     window.show_results(_sample_df(), _FakeStim(), switch_tab=False)
     assert window.sum_samples.text() == "4"

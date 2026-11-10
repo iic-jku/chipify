@@ -15,6 +15,7 @@ data (it re-saves the original text); otherwise it dumps the edited dict.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from pathlib import Path
 
@@ -52,6 +53,8 @@ _ANALYSIS_ROWS = (
     ("dc_signals", "DC Sweep", "e.g.  i(vdd), v(out)"),
     ("ac_signals", "AC / Bode", "e.g.  v(out), v(in)"),
 )
+#: A view snapshot that equals nothing, so an editor without one counts as unsaved.
+_UNKNOWN = object()
 
 
 class _Var:
@@ -105,6 +108,9 @@ class DatasheetEditorTab(QWidget):
         self.test_key: str = "tests"
         self.param_vars: list[dict] = []
         self.test_vars: list[dict] = []
+        #: What the visible view held when it last matched the file (see
+        #: _mark_clean); has_unsaved_changes compares against it.
+        self._clean_snapshot: object = _UNKNOWN
 
         self._build_ui()
 
@@ -247,6 +253,7 @@ class DatasheetEditorTab(QWidget):
         self.raw_editor.setPlainText(raw)
         self._build_form()
         self.equations_panel.reload()
+        self._mark_clean()
 
     # ── Form build ────────────────────────────────────────────────────────────
 
@@ -487,6 +494,10 @@ class DatasheetEditorTab(QWidget):
     # ── Mode switch ───────────────────────────────────────────────────────────
 
     def _on_mode_change(self, *_a) -> None:
+        # Asked while the stack still shows the old view. A switch converts the
+        # content (the raw text may be re-dumped), which is not an edit, so a
+        # clean editor stays clean and a dirty one stays dirty.
+        was_clean = not self.has_unsaved_changes()
         if self.mode_combo.currentText() == "Form View":
             try:
                 self.current_yaml_data = yaml.safe_load(self.raw_editor.toPlainText()) or {}
@@ -503,6 +514,8 @@ class DatasheetEditorTab(QWidget):
             if not self._raw_matches_state():
                 self.raw_editor.setPlainText(self._dump())
             self.stack.setCurrentIndex(1)
+        if was_clean:
+            self._mark_clean()
 
     def _raw_matches_state(self) -> bool:
         try:
@@ -527,6 +540,10 @@ class DatasheetEditorTab(QWidget):
                     if combo.itemText(i) != self._window.NO_DATASHEETS]
         dlg = NewDatasheetDialog(self, existing)
         if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.name():
+            return
+        # Before the copy is taken: saving here puts the edits into a copy of
+        # the open datasheet, and Cancel leaves no new file behind.
+        if not self.confirm_unsaved_changes():
             return
         source = dlg.source()
         try:
@@ -571,19 +588,83 @@ class DatasheetEditorTab(QWidget):
             self._sync_to_state()
         ReportsDialog(self, self._window.app_state, self).exec()
 
-    def _save(self) -> None:
+    def _save(self) -> bool:
+        """Write the editor's state to the datasheet; False when nothing was saved."""
         if not self.current_yaml_path:
             QMessageBox.warning(self, "Save", "No datasheet selected.")
-            return
+            return False
         try:
             text = self._compute_save_text()
             with open(self.current_yaml_path, "w", encoding="utf-8") as fh:
                 fh.write(text)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Save Error", f"Could not save datasheet:\n{exc}")
-            return
+            return False
         self.raw_text = text
+        self._mark_clean()
         self._window.set_status("Datasheet saved.", "#2ecc71")
+        return True
+
+    def _view_snapshot(self) -> object:
+        """What the visible view holds: the form's data, or the raw text.
+
+        Keyed on the stack, not the mode combo: while a mode switch is pending
+        the combo already names the new view but the old one is still shown.
+        """
+        if self.stack.currentIndex() == 0:
+            data = self.current_yaml_data if isinstance(self.current_yaml_data, dict) else {}
+            data = _ye.sync_form_to_yaml(
+                copy.deepcopy(data), self.param_key, self.test_key,
+                self.param_vars, self.test_vars, QuotedString,
+            )
+            return _ye.set_description(data, self.desc_edit.text())
+        return self.raw_editor.toPlainText()
+
+    def _mark_clean(self) -> None:
+        """Record the visible view as matching the file (after load or save)."""
+        try:
+            self._clean_snapshot = self._view_snapshot()
+        except Exception:  # noqa: BLE001
+            self._clean_snapshot = _UNKNOWN
+
+    def has_unsaved_changes(self) -> bool:
+        """True when the visible view differs from when it last matched the file.
+
+        Not "would Save write something else": the form's own round trip
+        changes some untouched values (a sweep value ``1.0e-14`` comes back
+        as the string ``'1e-14'``, a bound written ``2.1e9`` as a float),
+        which would flag 3 of 150 real datasheets checked on 2026-11-10 as
+        edited right after loading. Raw text that does not parse is compared
+        as text, so it counts as unsaved once typed.
+        """
+        if not self.current_yaml_path:
+            return False
+        try:
+            return self._view_snapshot() != self._clean_snapshot
+        except Exception:  # noqa: BLE001
+            return True
+
+    def confirm_unsaved_changes(self) -> bool:
+        """Ask to save or discard unsaved edits before another datasheet loads.
+
+        Loading rereads the file, so switching datasheets (or New…, which
+        switches to the new one) used to drop form and raw edits without a
+        word. Returns True when the caller may go on: nothing was unsaved, the
+        edits were saved, or the user discarded them. False on Cancel or a
+        failed save, and the editor keeps its edits.
+        """
+        if not self.has_unsaved_changes():
+            return True
+        choice = QMessageBox.question(
+            self, "Unsaved Changes",
+            f"{Path(self.current_yaml_path).name} has unsaved changes.\n"
+            "Save them before switching?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if choice == QMessageBox.Save:
+            return self._save()
+        return choice == QMessageBox.Discard
 
     def set_document_key(self, key: str, value) -> bool:
         """Set (or remove, when *value* is None) a top-level YAML key and save.
@@ -621,6 +702,7 @@ class DatasheetEditorTab(QWidget):
         self.raw_editor.setPlainText(text)
         if self.mode_combo.currentText() == "Form View":
             self._build_form()  # reflect any raw-synced changes
+        self._mark_clean()
         self._window.set_status("Datasheet saved.", "#2ecc71")
         return True
 
@@ -649,6 +731,7 @@ class DatasheetEditorTab(QWidget):
             )
             return False
         if text == self.raw_text:
+            self._mark_clean()  # the file already holds what the view shows
             return True  # nothing changed — don't rewrite the file
         try:
             with open(self.current_yaml_path, "w", encoding="utf-8") as fh:
@@ -657,5 +740,6 @@ class DatasheetEditorTab(QWidget):
             QMessageBox.critical(self, "Auto-save", f"Could not save datasheet:\n{exc}")
             return False
         self.raw_text = text
+        self._mark_clean()
         self._window.set_status("Datasheet auto-saved before run.", "#2ecc71")
         return True

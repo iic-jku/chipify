@@ -13,6 +13,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   description, so a variant (say, a mismatch datasheet with fewer seeds for a
   quicker run) is an edit of the original rather than a rewrite from scratch.
 
+### Fixed
+- Choosing another datasheet in the GUI, or creating one with **New…**, threw
+  away unsaved edits in the Datasheet Editor without a word: loading rereads
+  the file. It now asks to save, discard or cancel; Cancel keeps the edits and
+  puts the selector back. Saving first also puts the edits into a New… copy
+  of the open datasheet. Switching between Form View and Raw YAML is not
+  counted as an edit, so an untouched datasheet never asks.
+
 ## [0.2.3] - 2026-11-09
 
 ### Added

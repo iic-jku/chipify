@@ -198,6 +198,11 @@ A declared analysis (`transient/dc/ac_signals`) that produced no waveform CSV is
 *   `_dirty` tracks hand edits (`itemChanged`, suppressed while `_loading`), so a `reload()` that drops unsaved work says so rather than reverting silently. `_apply()` returns a bool so a removal knows whether it actually persisted.
 *   **Equations only add columns.** `equation_service.apply_scalar_equations` refuses an equation whose name is already a column of the frame (measurement, input, bookkeeping, earlier equation): a replaced measurement kept its simulated pass flags. `MainWindow.reapply_equations` therefore drops the previous `derived_cols` before re-applying, which is exactly the frame as simulated; a removed or newly failing equation would otherwise keep its old column.
 
+### Unsaved datasheet edits (`gui_qt/tabs/editor_tab.py`)
+*   Loading a datasheet rereads the file, so `MainWindow._on_datasheet_changed` and **New…** call `editor_tab.confirm_unsaved_changes()` first (Save / Discard / Cancel; Cancel puts the selector back on the open datasheet).
+*   `has_unsaved_changes()` compares the visible view (form data or raw text) with `_clean_snapshot`, **not** with the file: the form's own round trip changes untouched values (`1.0e-14` comes back as the string `'1e-14'`, a bound written `2.1e9` as a float), which flagged real datasheets as edited right after loading.
+*   **Every path that writes the datasheet or reloads it calls `_mark_clean()`** (load, `_save`, `set_document_key`, `autosave_for_run`), and a Form/Raw switch re-baselines only when the editor was clean before it. A new writer without it makes the prompt fire after a save.
+
 ### Editing `reports:` from the GUI (`gui_qt/widgets/reports_dialog.py`)
 *   Opened by **Reports…** in the Datasheet Editor toolbar, because the block belongs to the datasheet — chipify's paradigm is that a datasheet is fully buildable from the GUI.
 *   Persists through `editor_tab.set_document_key("reports", …)`, the same call the equations panel uses: one writer for top-level datasheet keys, and pending form/raw edits are synced first. An empty config renders as `None`, which removes the key instead of leaving an empty husk.

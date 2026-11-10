@@ -515,6 +515,12 @@ class MainWindow(QMainWindow):
         self.history_controller.refresh(select_latest=select_latest)
 
     def _on_datasheet_changed(self, _text: str) -> None:
+        if not self.editor_tab.confirm_unsaved_changes():
+            # Kept editing: put the selector back on the datasheet the editor
+            # still shows, or a run would start on the other one.
+            self.datasheet_combo.setCurrentText(
+                Path(self.editor_tab.current_yaml_path).name)
+            return
         self.refresh_history()
         self.editor_tab.load_datasheet()
         self._load_selected_datasheet_results()
