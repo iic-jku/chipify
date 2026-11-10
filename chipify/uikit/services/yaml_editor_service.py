@@ -87,8 +87,15 @@ def new_datasheet_template() -> str:
     )
 
 
-def create_datasheet(in_dir: str, name: str) -> str:
-    """Create ``<in_dir>/<name>.yaml`` from the starter template.
+def create_datasheet(in_dir: str, name: str, source: str | None = None) -> str:
+    """Create ``<in_dir>/<name>.yaml`` from the starter template or a copy.
+
+    With *source* (the path of an existing datasheet) the new file is a
+    byte-for-byte copy of it, so a variant of a datasheet (fewer seeds for a
+    faster run, other corners) keeps its comments, equations, reports block
+    and description instead of being rewritten from the blank template. The
+    source is read before anything is written, so a missing source raises
+    FileNotFoundError and leaves no empty file behind.
 
     The name is sanitised (path separators and other illegal filename
     characters become underscores; a ``.yaml``/``.yml`` extension is added if
@@ -106,7 +113,10 @@ def create_datasheet(in_dir: str, name: str) -> str:
     path = in_dir / base
     if path.exists():
         raise FileExistsError(f"{base} already exists in {in_dir}.")
-    path.write_text(new_datasheet_template(), encoding="utf-8")
+    if source is not None:
+        path.write_bytes(Path(source).read_bytes())
+    else:
+        path.write_text(new_datasheet_template(), encoding="utf-8")
     return str(path)
 
 

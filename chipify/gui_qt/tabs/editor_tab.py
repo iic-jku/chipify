@@ -22,10 +22,10 @@ import yaml
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -518,16 +518,27 @@ class DatasheetEditorTab(QWidget):
     # ── New / Save ────────────────────────────────────────────────────────────
 
     def _action_new(self) -> None:
-        name, ok = QInputDialog.getText(self, "New Datasheet", "Name for the new datasheet:")
-        if not ok or not name.strip():
+        from chipify.gui_qt.widgets.new_datasheet_dialog import NewDatasheetDialog
+
+        # The selector's list, not a rescan: refresh_datasheets() rebuilds the
+        # combo and could leave it showing another datasheet than the editor.
+        combo = self._window.datasheet_combo
+        existing = [combo.itemText(i) for i in range(combo.count())
+                    if combo.itemText(i) != self._window.NO_DATASHEETS]
+        dlg = NewDatasheetDialog(self, existing)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.name():
             return
+        source = dlg.source()
         try:
-            path = _ye.create_datasheet(settings.IN_DIR, name)
+            path = _ye.create_datasheet(
+                settings.IN_DIR, dlg.name(),
+                source=str(Path(settings.IN_DIR) / source) if source else None)
         except (ValueError, FileExistsError, OSError) as exc:
             QMessageBox.critical(self, "New Datasheet", str(exc))
             return
         self._window.set_active_datasheet(Path(path).name)
-        self._window.set_status(f"Created {Path(path).name}", "#2ecc71")
+        origin = f" from {source}" if source else ""
+        self._window.set_status(f"Created {Path(path).name}{origin}", "#2ecc71")
 
     def _compute_save_text(self) -> str:
         """Return the YAML text to persist for the current editor state.

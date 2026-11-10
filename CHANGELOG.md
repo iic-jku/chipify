@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- The Datasheet Editor's **New…** dialog can start from an existing datasheet
+  instead of the blank template ("Start from"). The new file is a copy of the
+  saved datasheet with its comments, equations, reports block and
+  description, so a variant (say, a mismatch datasheet with fewer seeds for a
+  quicker run) is an edit of the original rather than a rewrite from scratch.
+
 ## [0.2.3] - 2026-11-09
 
 ### Added

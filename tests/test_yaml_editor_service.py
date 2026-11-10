@@ -323,6 +323,42 @@ def test_create_datasheet_rejects_empty_name(tmp_path) -> None:
         create_datasheet(str(tmp_path), "   ")
 
 
+def test_create_datasheet_from_source_copies_it_verbatim(tmp_path) -> None:
+    # Comments, CRLF line endings, a BOM and the equations/description keys
+    # must all survive: the copy is a starting point, not a re-dump.
+    from chipify.uikit.services.yaml_editor_service import create_datasheet
+    src = tmp_path / "mismatch.yaml"
+    src.write_bytes(
+        b"\xef\xbb\xbf# 500 seeds for the sign-off run\r\n"
+        b"description: offset over mismatch\r\n"
+        b"parameters:\r\n  seed: range(500)\r\n"
+        b"tests:\r\n  tb_ota:\r\n    vos:\r\n      max: 0.002\r\n"
+        b"equations:\r\n  vos_mv: vos * 1e3\r\n")
+    path = create_datasheet(str(tmp_path), "mismatch_quick", source=str(src))
+    assert path.endswith("mismatch_quick.yaml")
+    assert open(path, "rb").read() == src.read_bytes()
+
+
+def test_create_datasheet_from_source_refuses_overwrite(tmp_path) -> None:
+    from chipify.uikit.services.yaml_editor_service import create_datasheet
+    src = tmp_path / "a.yaml"
+    src.write_text("parameters:\n  temp: [27]\n", encoding="utf-8")
+    other = tmp_path / "b.yaml"
+    other.write_text("keep me\n", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        create_datasheet(str(tmp_path), "b", source=str(src))
+    with pytest.raises(FileExistsError):
+        create_datasheet(str(tmp_path), "a", source=str(src))   # onto itself
+    assert other.read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_create_datasheet_missing_source_writes_nothing(tmp_path) -> None:
+    from chipify.uikit.services.yaml_editor_service import create_datasheet
+    with pytest.raises(FileNotFoundError):
+        create_datasheet(str(tmp_path), "copy", source=str(tmp_path / "gone.yaml"))
+    assert not (tmp_path / "copy.yaml").exists()
+
+
 # ── reports: block round-trip (the dialog's data path) ────────────────────────
 
 def test_reports_block_round_trips_through_the_config():

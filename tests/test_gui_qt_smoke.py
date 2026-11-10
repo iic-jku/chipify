@@ -970,6 +970,79 @@ def test_autosave_for_run_cancels_on_invalid_yaml(qt_app, tmp_path, monkeypatch)
         win.close()
 
 
+def test_new_datasheet_dialog_offers_blank_and_existing(qt_app):
+    from PySide6.QtWidgets import QDialogButtonBox
+    from chipify.gui_qt.widgets.new_datasheet_dialog import (
+        BLANK_TEMPLATE, NewDatasheetDialog)
+    dlg = NewDatasheetDialog(None, ["ac.yaml", "mismatch.yaml"])
+    items = [dlg.source_combo.itemText(i) for i in range(dlg.source_combo.count())]
+    assert items == [BLANK_TEMPLATE, "ac.yaml", "mismatch.yaml"]
+    assert dlg.source() is None                     # blank is the default
+    ok = dlg._buttons.button(QDialogButtonBox.Ok)
+    assert not ok.isEnabled()                       # no name, no OK
+    dlg.name_edit.setText("  quick  ")
+    assert ok.isEnabled() and dlg.name() == "quick"
+    dlg.source_combo.setCurrentText("mismatch.yaml")
+    assert dlg.source() == "mismatch.yaml"
+
+
+def test_new_datasheet_from_existing_copies_and_selects_it(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from chipify import settings
+    from chipify.gui_qt.widgets import new_datasheet_dialog as _nd
+    monkeypatch.setattr(settings, "IN_DIR", str(tmp_path))
+    original = ("# sign-off: 500 seeds\n"
+                "parameters:\n  seed: range(500)\n"
+                "tests:\n  tb_ota:\n    vos:\n      max: 0.002\n")
+    (tmp_path / "mismatch.yaml").write_text(original, encoding="utf-8")
+    (tmp_path / "ac.yaml").write_text(
+        "parameters:\n  temp: [27]\ntests:\n  tb_ac:\n    gain:\n      min: 40\n",
+        encoding="utf-8")
+
+    def _pick_mismatch(self):
+        self.name_edit.setText("mismatch_quick")
+        self.source_combo.setCurrentText("mismatch.yaml")
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(_nd.NewDatasheetDialog, "exec", _pick_mismatch)
+
+    from chipify.gui_qt.main_window import MainWindow
+    win = MainWindow()
+    try:
+        win.set_active_datasheet("ac.yaml")
+        win.editor_tab._action_new()
+        copy = tmp_path / "mismatch_quick.yaml"
+        assert copy.read_text(encoding="utf-8") == original
+        # The copy is now the selected datasheet, open in the editor.
+        assert win.datasheet_combo.currentText() == "mismatch_quick.yaml"
+        assert win.editor_tab.current_yaml_path == str(copy)
+        assert win.editor_tab.raw_editor.toPlainText() == original
+    finally:
+        win.close()
+
+
+def test_new_datasheet_blank_still_uses_template(qt_app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+    from chipify import settings
+    from chipify.gui_qt.widgets import new_datasheet_dialog as _nd
+    from chipify.uikit.services.yaml_editor_service import new_datasheet_template
+    monkeypatch.setattr(settings, "IN_DIR", str(tmp_path))
+
+    def _blank(self):
+        self.name_edit.setText("fresh")
+        return QDialog.DialogCode.Accepted
+    monkeypatch.setattr(_nd.NewDatasheetDialog, "exec", _blank)
+
+    from chipify.gui_qt.main_window import MainWindow
+    win = MainWindow()
+    try:
+        win.editor_tab._action_new()
+        assert (tmp_path / "fresh.yaml").read_text(encoding="utf-8") \
+            == new_datasheet_template()
+        assert win.datasheet_combo.currentText() == "fresh.yaml"
+    finally:
+        win.close()
+
+
 def test_run_summary_updates(window):
     window.show_results(_sample_df(), _FakeStim(), switch_tab=False)
     assert window.sum_samples.text() == "4"
