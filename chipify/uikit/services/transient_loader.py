@@ -30,16 +30,29 @@ from chipify.uikit.services.equation_service import apply_transient_equations
 log = logging.getLogger("chipify.uikit.services.transient")
 
 
-#: UI label -> ``Analysis.kind`` as written on disk and in
-#: ``df.attrs["analysis_dirs"]``. One definition, shared by the Plots tab and
-#: the Multi-plot dashboard cell so their kind selectors cannot drift apart.
+#: UI label -> waveform view. One definition, shared by the Plots tab and the
+#: Multi-plot dashboard cell so their selectors cannot drift apart. A view is
+#: what is drawn (``plot_manager.WAVEFORM_DRAWERS``); the analysis kind whose
+#: CSVs it reads is :data:`VIEW_KINDS`.
 KIND_LABELS: dict[str, str] = {"Transient": "transient", "DC Sweep": "dc",
-                               "Bode": "ac"}
+                               "Bode": "ac", "Spectrum": "spectrum"}
+
+#: Waveform view -> ``Analysis.kind`` as written on disk and in
+#: ``df.attrs["analysis_dirs"]``. The spectrum is a view of the transient
+#: data, not an analysis of its own: it needs no capture of its own and no
+#: change to the testbench.
+VIEW_KINDS: dict[str, str] = {"transient": "transient", "dc": "dc", "ac": "ac",
+                              "spectrum": "transient"}
+
+
+def view_for_label(label: str) -> str:
+    """Waveform view for a UI label, defaulting to transient."""
+    return KIND_LABELS.get(label, "transient")
 
 
 def kind_for_label(label: str) -> str:
-    """Analysis kind for a UI label, defaulting to transient."""
-    return KIND_LABELS.get(label, "transient")
+    """Analysis kind whose CSVs a UI label's view reads, defaulting to transient."""
+    return VIEW_KINDS[view_for_label(label)]
 
 
 def pad_run_id(value: Any) -> str:

@@ -12,6 +12,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saved datasheet with its comments, equations, reports block and
   description, so a variant (say, a mismatch datasheet with fewer seeds for a
   quicker run) is an edit of the original rather than a rewrite from scratch.
+- **Spectrum** of transient waveforms: a *Spectrum* mode in the Plots tab and
+  the Multi-plot dashboard, and a `type: spectrum` plot for the datasheet's
+  `reports:` block (PNG, SVG, PDF). It is the FFT of the captured
+  `transient_signals` and `transient_equations`, so the testbench needs no
+  change. `window:` is `hann` (the default), `blackman_harris` or
+  `rectangular`. Amplitudes are peak values in dB, so a 0.5 V sine reads
+  -6 dB at its frequency, over a log frequency axis like the Bode plot's; the
+  DC level is removed first and not drawn. SPICE time steps are uneven, so the
+  waveform is resampled onto an even grid first; for a clean spectrum, bound
+  the step and skip the settling in the testbench's `.tran`. There is no
+  LaTeX export for it yet, and the dashboard cell always uses the Hann window.
 
 ### Fixed
 - Choosing another datasheet in the GUI, or creating one with **New…**, threw

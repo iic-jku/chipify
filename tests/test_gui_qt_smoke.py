@@ -183,7 +183,52 @@ def test_plots_tab_empty_state(window):
     tt._redraw()
     tt.kind_combo.setCurrentText("Bode")      # exercises the ac/bode path
     tt._redraw()
+    tt.kind_combo.setCurrentText("Spectrum")  # exercises the spectrum path
+    tt._redraw()
     assert tt.canvas.figure.axes               # an axes was drawn each time
+
+
+def test_plots_tab_spectrum_view(window, tmp_path):
+    """The spectrum reads the transient CSVs; only it shows the window choice."""
+    import numpy as np
+    from chipify.analyses import TransientAnalysis
+
+    class _Stim(_FakeStim):
+        def __init__(self):
+            super().__init__()
+            self.tests[0].analyses = [TransientAnalysis(["v(out)"])]
+            self.transient_equations = []
+
+    t = np.linspace(0.0, 10e-3, 1000, endpoint=False)
+    adir = tmp_path / "transient"
+    adir.mkdir()
+    pd.DataFrame({"time": t, "v(out)": 0.5 * np.sin(2 * np.pi * 1e3 * t)}).to_csv(
+        adir / "run_000000__tb_fake.csv", index=False)
+    df = _sample_df().head(1).assign(run_id=["0"])
+    df.attrs["analysis_dirs"] = {"transient": str(adir)}
+    window.show_results(df, _Stim(), switch_tab=False)
+
+    pt = window.plots_tab
+    assert not pt.window_combo.isVisibleTo(pt) and pt.btn_latex.isEnabled()
+    pt.kind_combo.setCurrentText("Spectrum")
+    pt._on_kind_change()
+    assert pt.window_combo.isVisibleTo(pt)
+    # The TeX exporter would write the time-domain CSVs under a spectrum's name.
+    assert not pt.btn_latex.isEnabled()
+    assert [pt.signal_list.item(i).text() for i in range(pt.signal_list.count())] \
+        == ["v(out)"]
+
+    pt.window_combo.setCurrentIndex(pt.window_combo.findData("blackman_harris"))
+    pt._redraw()
+    ax = pt.canvas.figure.axes[0]
+    assert ax.get_xlabel() == "Frequency (Hz)"
+    assert "Blackman-Harris" in ax.get_title()
+    assert len(ax.lines) == 1
+    assert pt._hover_state is not None and len(pt._hover_state.line_map) == 1
+
+    pt.kind_combo.setCurrentText("Transient")
+    pt._on_kind_change()
+    assert not pt.window_combo.isVisibleTo(pt) and pt.btn_latex.isEnabled()
 
 
 def test_plots_tab_group_by_offers_swept_parameters(window):
@@ -228,13 +273,14 @@ def test_dashboard_cell_has_kind_and_group_controls(window):
         assert cell.kind_combo.isVisibleTo(cell)
         assert cell.group_combo.isVisibleTo(cell)
 
-        # All three analysis kinds are selectable, not just transient.
+        # Every waveform view is selectable, not just transient.
         kinds = [cell.kind_combo.itemText(i) for i in range(cell.kind_combo.count())]
-        assert kinds == ["Transient", "DC Sweep", "Bode"]
+        assert kinds == ["Transient", "DC Sweep", "Bode", "Spectrum"]
 
-        cell.kind_combo.setCurrentText("Bode")
-        cell.redraw(*mp.data_snapshot())
-        assert cell.canvas.figure.axes
+        for kind in ("Bode", "Spectrum"):
+            cell.kind_combo.setCurrentText(kind)
+            cell.redraw(*mp.data_snapshot())
+            assert cell.canvas.figure.axes
 
         # A dashboard saved before the rename must still open.
         cell.apply_config({"mode": "Transient", "kind": "Bode"})
@@ -583,6 +629,29 @@ def test_reports_dialog_shown_defaults_are_the_stored_ones(window, tmp_path, mon
     spec = dlg._current()
     assert spec.options["param"] == dlg._fields["param"].currentText()
     assert spec.options["param"] in ("gain", "pm")
+
+
+def test_reports_dialog_offers_the_spectrum_windows(window, tmp_path, monkeypatch):
+    """The window field is a choice of the plotter's own windows, stored as shown."""
+    import yaml
+    from chipify import spectrum
+    from chipify.gui_qt.widgets.reports_dialog import ReportsDialog
+    from chipify.util import Stimuli
+
+    editor, ds = _open_editor_on(window, tmp_path, monkeypatch, _DATASHEET)
+    dlg = ReportsDialog(editor, window.app_state, editor)
+    dlg._add_plot()
+    dlg._on_type_changed("spectrum")
+    combo = dlg._fields["window"]
+    assert [combo.itemText(i) for i in range(combo.count())] == list(spectrum.WINDOWS)
+    assert dlg._current().options["window"] == spectrum.DEFAULT_WINDOW
+
+    combo.setCurrentText("rectangular")
+    dlg.format_checks["png"].setChecked(True)
+    assert dlg._write()
+    plot = yaml.safe_load(ds.read_text(encoding="utf-8"))["reports"]["plots"][0]
+    assert plot["type"] == "spectrum" and plot["window"] == "rectangular"
+    assert Stimuli(str(ds)).reports.plots[0].options["window"] == "rectangular"
 
 
 def test_reports_dialog_clearing_removes_the_block(window, tmp_path, monkeypatch):

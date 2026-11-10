@@ -1,12 +1,12 @@
 # Copyright (c) 2026 Santiago Hofwimmer
 """
-plots_tab.py – Waveform overlays (Transient / DC sweep / Bode).
+plots_tab.py – Waveform overlays (Transient / DC sweep / Bode / Spectrum).
 
 Reuses the shared, framework-agnostic
 :mod:`chipify.uikit.services.transient_loader` (directory resolution + signal
-discovery) and the ``PlotManager.draw_transient_plot`` / ``draw_dc_sweep`` /
-``draw_bode_plot`` overlay plotters unchanged. This tab supplies the Qt
-controls: analysis kind, run-selection mode, and a multi-select signal list.
+discovery) and the ``plot_manager.WAVEFORM_DRAWERS`` overlay plotters
+unchanged. This tab supplies the Qt controls: waveform view, run-selection
+mode, a multi-select signal list, and the window for the spectrum.
 
 Unlike the histogram/analytics tabs this one reads per-run CSVs from disk, so it
 redraws on completed loads (``data_changed``) only — not on every live chunk.
@@ -30,12 +30,13 @@ from PySide6.QtWidgets import (
 
 from chipify import data_loader as _dl
 from chipify import settings
+from chipify import spectrum as _spectrum
 from chipify.uikit.services import transient_loader as _tl
 from chipify.uikit.services.curve_hover import CurveHoverManager, CurveHoverState
 from chipify.uikit.state import AppState
 from chipify.gui_qt.widgets.helpers import compact_combo, deferred
 from chipify.gui_qt.widgets.mpl_canvas import MplCanvas
-from chipify.plot_manager import PlotManager
+from chipify.plot_manager import WAVEFORM_DRAWERS
 
 log = logging.getLogger("chipify.gui_qt.tabs.plots")
 
@@ -97,6 +98,16 @@ class PlotsTab(QWidget):
         self.n_edit = QLineEdit("10")
         self.n_edit.setFixedWidth(90)
         self.n_edit.setPlaceholderText("N or ids…")
+        self.window_label = QLabel("Window:")
+        self.window_combo = QComboBox()
+        for key in _spectrum.WINDOWS:
+            self.window_combo.addItem(_spectrum.WINDOW_LABELS[key], key)
+        compact_combo(self.window_combo, length=12)
+        self.window_combo.setToolTip(
+            "FFT window. Hann suits most signals; Blackman-Harris shows "
+            "harmonics far below the fundamental; Rectangular is exact only "
+            "when the simulated time holds a whole number of periods."
+        )
         self.btn_refresh = QPushButton("↺ Refresh")
 
         controls.addWidget(QLabel("Mode:"))
@@ -106,6 +117,8 @@ class PlotsTab(QWidget):
         controls.addWidget(self.n_edit)
         controls.addWidget(QLabel("Group by:"))
         controls.addWidget(self.group_combo)
+        controls.addWidget(self.window_label)
+        controls.addWidget(self.window_combo)
         controls.addStretch(1)
         self.btn_export = QPushButton("Export…")
         self.btn_export.clicked.connect(self._export)
@@ -137,23 +150,43 @@ class PlotsTab(QWidget):
         self.kind_combo.currentIndexChanged.connect(deferred(self._on_kind_change))
         self.mode_combo.currentIndexChanged.connect(deferred(self._on_mode_change))
         self.group_combo.currentIndexChanged.connect(deferred(self._redraw))
+        self.window_combo.currentIndexChanged.connect(deferred(self._redraw))
         self.btn_refresh.clicked.connect(self._redraw)
         self.btn_select_all.clicked.connect(self.signal_list.selectAll)
         self._apply_mode_visibility()
+        self._apply_view_controls()
 
     # ── Control handlers ──────────────────────────────────────────────────────
 
     def _current_kind(self) -> str:
+        """Analysis kind whose CSVs the selected view reads."""
         return _tl.kind_for_label(self.kind_combo.currentText())
+
+    def _current_view(self) -> str:
+        return _tl.view_for_label(self.kind_combo.currentText())
 
     def _apply_mode_visibility(self) -> None:
         self.n_edit.setVisible(self.mode_combo.currentText() in ("First N", "Custom IDs"))
+
+    def _apply_view_controls(self) -> None:
+        """The window selector belongs to the spectrum; TeX does not support it.
+
+        The TeX exporter writes the captured CSVs as they are, so in the
+        Spectrum view it would export time-domain data under a spectrum's name.
+        """
+        spectrum = self._current_view() == "spectrum"
+        self.window_label.setVisible(spectrum)
+        self.window_combo.setVisible(spectrum)
+        self.btn_latex.setEnabled(not spectrum)
+        self.btn_latex.setToolTip(
+            "TeX export is not available for the spectrum." if spectrum else "")
 
     def _on_mode_change(self, *_a) -> None:
         self._apply_mode_visibility()
         self._redraw()
 
     def _on_kind_change(self, *_a) -> None:
+        self._apply_view_controls()
         self._refresh_signal_list()
         self._redraw()
 
@@ -242,13 +275,12 @@ class PlotsTab(QWidget):
 
     def _redraw(self, *_args) -> None:
         kind = self._current_kind()
+        view = self._current_view()
         theme = self._plot_theme()
         self.canvas.set_background(theme["bg"])
-        draw_fn = {
-            "transient": PlotManager.draw_transient_plot,
-            "dc": PlotManager.draw_dc_sweep,
-            "ac": PlotManager.draw_bode_plot,
-        }[kind]
+        draw_fn = WAVEFORM_DRAWERS[view]
+        extra = ({"window": self.window_combo.currentData()}
+                 if view == "spectrum" else {})
         fig, canvas = self.canvas.figure, self.canvas.canvas
 
         df = self._state.active_df
@@ -262,7 +294,8 @@ class PlotsTab(QWidget):
         self._hover.invalidate()
 
         if df is None or not adir or not signals:
-            draw_fn(fig, canvas, adir, [], [], bg_color=theme["bg"], theme=theme)
+            draw_fn(fig, canvas, adir, [], [], bg_color=theme["bg"], theme=theme,
+                    **extra)
             return
 
         run_ids = self._selected_run_ids(df)
@@ -273,6 +306,7 @@ class PlotsTab(QWidget):
             pass_map=_tl.run_pass_map(df), bg_color=theme["bg"],
             equations=equations, theme=theme,
             group_map=_tl.run_group_map(df, group_col), group_label=group_col,
+            **extra,
         )
         self._hover_state = CurveHoverState(line_map, df, self._state.current_stim)
 

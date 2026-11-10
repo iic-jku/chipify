@@ -631,14 +631,22 @@ class PlotManager:
         theme=None,
         group_map: dict | None = None,
         group_label: str = "",
+        transform=None,
+        y_label: str = "Signal Value",
     ) -> dict:
         """
         Overlay per-run curves from CSV files. Internal helper shared by
-        ``draw_transient_plot`` and ``draw_dc_sweep``. The Bode plot uses its
-        own implementation because it needs two stacked subplots.
+        ``draw_transient_plot``, ``draw_dc_sweep`` and ``draw_spectrum_plot``.
+        The Bode plot uses its own implementation because it needs two stacked
+        subplots.
 
         *group_map* (``run_id -> value``) plus *group_label* colour the curves by
         a swept input parameter instead of by run index — see _OverlayStyle.
+
+        *transform*, when given, maps each curve's ``(x, y)`` arrays to the
+        arrays actually drawn (the spectrum's FFT). A curve it raises
+        ValueError for is skipped, and the error is shown when no curve is
+        left.
         """
         th = _resolve_theme(theme, bg_color=bg_color)
         fg = th["fg"]
@@ -705,6 +713,7 @@ class PlotManager:
 
         # ── Draw curves ───────────────────────────────────────────────────────
         first_error: str = ""
+        transform_error: str = ""
         drawn_any = False
         for run_id, fpath in matched:
             try:
@@ -736,7 +745,15 @@ class PlotManager:
             for sig in signals:
                 if sig not in df.columns:
                     continue
-                lines = ax.plot(x, df[sig], color=style.color(run_id, sig),
+                cx, cy = x, df[sig]
+                if transform is not None:
+                    try:
+                        cx, cy = transform(df[x_col].to_numpy(), df[sig].to_numpy())
+                    except ValueError as exc:
+                        if not transform_error:
+                            transform_error = f"run {run_id}, {sig}: {exc}"
+                        continue
+                lines = ax.plot(cx, cy, color=style.color(run_id, sig),
                                 linestyle=style.linestyle(sig), alpha=alpha,
                                 linewidth=0.8, rasterized=(n_curves > 200))
                 if lines:
@@ -744,8 +761,12 @@ class PlotManager:
                 drawn_any = True
 
         if not drawn_any:
-            msg = f"Could not read any waveform data.\n({first_error})" if first_error \
-                else "Waveform files exist but contain no matching signal columns."
+            if first_error:
+                msg = f"Could not read any waveform data.\n({first_error})"
+            elif transform_error:
+                msg = f"Could not draw any curve.\n({transform_error})"
+            else:
+                msg = "Waveform files exist but contain no matching signal columns."
             ax.text(0.5, 0.5, msg, ha="center", va="center", color="gray",
                     transform=ax.transAxes, fontsize=11)
             ax.axis("off")
@@ -755,7 +776,7 @@ class PlotManager:
         # ── Axes labels ───────────────────────────────────────────────────────
         x_label = f"{x_axis_label} ({x_unit})" if x_unit else x_axis_label
         ax.set_xlabel(x_label, color=fg)
-        ax.set_ylabel("Signal Value", color=fg)
+        ax.set_ylabel(y_label, color=fg)
         if x_log:
             ax.set_xscale("log")
         n_runs_drawn = len({rid for rid, _ in matched})
@@ -845,6 +866,63 @@ class PlotManager:
             time_autoscale=False,
             pass_map=pass_map, bg_color=bg_color, equations=equations, theme=theme,
             group_map=group_map, group_label=group_label,
+        )
+
+    @staticmethod
+    def draw_spectrum_plot(
+        fig,
+        canvas,
+        tran_dir: str,
+        run_ids: list,
+        signals: list,
+        *,
+        window: str = "",
+        pass_map: dict | None = None,
+        bg_color: str = "#1a1a1a",
+        equations: list | None = None,
+        theme=None,
+        group_map: dict | None = None,
+        group_label: str = "",
+    ) -> dict:
+        """Overlay the amplitude spectra (dB) of the transient waveforms.
+
+        Reads the same per-run transient CSVs as ``draw_transient_plot``,
+        including ``transient_equations`` results, and takes each curve's FFT
+        through :func:`chipify.spectrum.amplitude_spectrum` — the only FFT in
+        chipify. *window* is a name from ``spectrum.WINDOWS`` (default Hann);
+        an unknown one raises ValueError before anything is drawn.
+
+        The frequency axis is logarithmic, as on the Bode plot: a transient is
+        sampled far above the signal's own frequencies, and on a linear axis up
+        to Nyquist the fundamental and its harmonics shared the leftmost few
+        percent of the plot. A log axis has no 0 Hz, so the DC bin is left out
+        and the mean removed (``remove_dc``): the window would otherwise smear
+        the bias point over the lowest bins drawn.
+        """
+        from chipify import spectrum
+
+        name = spectrum.check_window(window or spectrum.DEFAULT_WINDOW)
+
+        def _to_spectrum(time, values):
+            freq, amp = spectrum.amplitude_spectrum(time, values, name,
+                                                    remove_dc=True)
+            return freq[1:], spectrum.to_db(amp[1:])
+
+        return PlotManager._draw_xy_overlay(
+            fig, canvas, tran_dir, run_ids, signals,
+            x_col="time",
+            x_axis_label="Frequency (Hz)",
+            title_prefix=f"Spectrum ({spectrum.WINDOW_LABELS[name]} window)",
+            empty_msg=("No transient data.\nThe spectrum is computed from "
+                       "transient_signals: run a simulation with them defined,\n"
+                       "then select signals and click Refresh."),
+            no_files_msg=("No transient CSV files found for the selected runs.\n"
+                          "The simulation may not have used transient_signals, "
+                          "or the files have been removed."),
+            time_autoscale=False, x_log=True,
+            pass_map=pass_map, bg_color=bg_color, equations=equations, theme=theme,
+            group_map=group_map, group_label=group_label,
+            transform=_to_spectrum, y_label="Amplitude (dB)",
         )
 
     @staticmethod
@@ -1011,3 +1089,15 @@ class PlotManager:
         fig.tight_layout()
         canvas.draw()
         return line_map
+
+
+#: Waveform view -> overlay plotter. A view is what is drawn; the analysis kind
+#: whose CSVs it reads is ``transient_loader.VIEW_KINDS[view]``. The one table
+#: behind the Plots tab, the dashboard cell and the report renderer, which each
+#: carried a copy of it before the spectrum became a fourth view.
+WAVEFORM_DRAWERS = {
+    "transient": PlotManager.draw_transient_plot,
+    "dc": PlotManager.draw_dc_sweep,
+    "ac": PlotManager.draw_bode_plot,
+    "spectrum": PlotManager.draw_spectrum_plot,
+}

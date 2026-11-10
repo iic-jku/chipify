@@ -364,6 +364,14 @@ def _validate_reports(data: dict[str, Any]) -> "Any":
             except ValueError as exc:
                 raise SchemaError(f"{path}.runs: {exc}") from None
 
+        # A spectrum's window, against the vocabulary the plotter itself uses.
+        if "window" in entry:
+            from chipify.spectrum import check_window
+            try:
+                check_window(entry["window"])
+            except ValueError as exc:
+                raise SchemaError(f"{path}.window: {exc}") from None
+
         formats = _formats(entry.get("formats"), f"{path}.formats")
         if LATEX_FORMAT in formats and not spec_type.supports_latex:
             # Not fatal: report_service warns and still writes the other

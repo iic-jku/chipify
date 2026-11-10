@@ -105,8 +105,12 @@ def _new_figure(figsize=None):
 
 
 def _render_waveform(spec: PlotSpec, df, stim, out_root, theme, figsize=None):
-    """Draw one transient / dc / bode overlay. Returns (fig, latex_callable)."""
-    from chipify.plot_manager import PlotManager
+    """Draw one transient / dc / bode / spectrum overlay.
+
+    Returns ``(fig, latex_callable)``, the callable ``None`` for a type without
+    a pgfplots generator.
+    """
+    from chipify.plot_manager import WAVEFORM_DRAWERS
 
     ptype = spec.plot_type
     opts = spec.options
@@ -125,16 +129,18 @@ def _render_waveform(spec: PlotSpec, df, stim, out_root, theme, figsize=None):
     group_col = str(opts.get("group") or "")
     equations = (_eq_service().transient_equations(stim)
                  if kind == "transient" else [])
-    draw_fn = {
-        "transient": PlotManager.draw_transient_plot,
-        "dc": PlotManager.draw_dc_sweep,
-        "ac": PlotManager.draw_bode_plot,
-    }[kind]
+    view = ptype.waveform_view
+    draw_fn = WAVEFORM_DRAWERS[view]
+    extra = {"window": str(opts.get("window") or "")} if view == "spectrum" else {}
 
     fig, canvas = _new_figure(figsize)
     draw_fn(fig, canvas, adir, run_ids, signals,
             pass_map=_tl.run_pass_map(df), equations=equations, theme=theme,
-            group_map=_tl.run_group_map(df, group_col), group_label=group_col)
+            group_map=_tl.run_group_map(df, group_col), group_label=group_col,
+            **extra)
+
+    if not ptype.supports_latex:
+        return fig, None
 
     def _latex(dest: Path, stem: str):
         from chipify import export_latex

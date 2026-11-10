@@ -88,6 +88,9 @@ def test_full_block_parses():
     ("reports:\n  plots_per_page: 3", "plots_per_page"),
     ("reports:\n  plots_per_page: true", "plots_per_page"),
     ("reports:\n  plots_per_page: '2'", "plots_per_page"),
+    ("reports:\n  plots: [{type: spectrum, window: kaiser}]",
+     "reports.plots[0].window: unknown window 'kaiser'"),
+    ("reports:\n  plots: [{type: transient, window: hann}]", "unknown key 'window'"),
 ])
 def test_invalid_blocks_name_the_offending_path(block, fragment):
     with pytest.raises(SchemaError) as exc:
@@ -239,6 +242,53 @@ def test_missing_waveform_directory_warns_rather_than_raising(tmp_path):
     result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
     assert result.files == []
     assert len(result.warnings) == 1
+
+
+def _with_transient_waveforms(tmp_path) -> pd.DataFrame:
+    """The results plus a 1 kHz tone per run on disk, as a finished run has them."""
+    import numpy as np
+    adir = tmp_path / "analysis_data" / "transient" / "20261110_120000"
+    adir.mkdir(parents=True)
+    t = np.linspace(0.0, 10e-3, 1000, endpoint=False)
+    df = _results()
+    for rid in df["run_id"]:
+        pd.DataFrame({"time": t, "v(out)": 0.5 * np.sin(2 * np.pi * 1e3 * t)}).to_csv(
+            adir / f"run_{int(rid):06d}__tb.csv", index=False)
+    df.attrs["analysis_dirs"] = {"transient": str(adir)}
+    return df
+
+
+def test_spectrum_plot_renders_from_the_transient_waveforms(tmp_path):
+    stim = _stim("""
+        reports:
+          formats: [png, svg, latex]
+          plots:
+            - {type: spectrum, signals: [v(out)], window: Blackman_Harris, group: temp}
+    """)
+    assert stim.reports.plots[0].plot_type.kind == "transient"
+    result = rs.generate_reports(_with_transient_waveforms(tmp_path), stim,
+                                 "d.yaml", tmp_path)
+    assert sorted(f.name for f in result.files) == [
+        "spectrum_v_out_by_temp.png", "spectrum_v_out_by_temp.svg"]
+    assert all(f.stat().st_size > 0 for f in result.files)
+    # No pgfplots generator: the TeX overlay exporters would write the captured
+    # time-domain CSVs under the spectrum's name.
+    assert len(result.warnings) == 1, result.warnings
+    assert "LaTeX" in result.warnings[0] and "'spectrum'" in result.warnings[0]
+
+
+def test_spectrum_page_in_the_pdf_uses_the_datasheet_window(tmp_path):
+    stim = _stim("""
+        reports:
+          pdf: true
+          plots: [{type: spectrum, signals: [v(out)], window: rectangular}]
+    """)
+    df = _dl_prepared()
+    df.attrs = _with_transient_waveforms(tmp_path).attrs
+    (page,) = _pdf_pages(stim, df, tmp_path)
+    assert any(t.startswith("Spectrum (Rectangular window)")
+               for t in page["titles"]), page
+    assert page["artists"] >= 4              # one curve per run
 
 
 def test_documents_and_latest_pointer(tmp_path):

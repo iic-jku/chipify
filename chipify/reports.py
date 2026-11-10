@@ -34,12 +34,19 @@ class PlotType:
     adv_mode: str = ""
     #: Analysis kind for waveform overlays ("transient" / "dc" / "ac").
     kind: str = ""
+    #: Waveform view drawn from that kind's CSVs, when it is not the kind
+    #: itself (``plot_manager.WAVEFORM_DRAWERS``): ``spectrum`` reads transient.
+    view: str = ""
     #: True when ``export_latex`` has a pgfplots generator for this type.
     supports_latex: bool = False
 
     @property
     def is_waveform(self) -> bool:
         return bool(self.kind)
+
+    @property
+    def waveform_view(self) -> str:
+        return self.view or self.kind
 
 
 #: Every plot type a ``reports:`` block may declare.
@@ -80,6 +87,12 @@ PLOT_TYPES: dict[str, PlotType] = {
     "bode": PlotType(
         "bode", optional=("signals", "group", "runs"),
         kind="ac", supports_latex=True,
+    ),
+    # FFT of the transient waveforms (chipify.spectrum). No pgfplots generator:
+    # the TeX overlay exporters write the captured CSVs, not a spectrum.
+    "spectrum": PlotType(
+        "spectrum", optional=("signals", "group", "runs", "window"),
+        kind="transient", view="spectrum",
     ),
 }
 

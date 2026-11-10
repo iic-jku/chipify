@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from chipify import data_loader as _dl
+from chipify import spectrum as _spectrum
 from chipify.reports import PLOT_TYPES, PlotSpec, ReportsConfig
 from chipify.uikit.services import transient_loader as _tl
 from chipify.uikit.services import yaml_editor_service as _ye
@@ -48,7 +49,7 @@ _FIT_CURVES = ["Gauss (Normal)", "KDE (Smoothed)", "Uniform",
 _BINS = ["Auto", "10", "20", "50", "100", "200"]
 
 #: How each option key is edited. Keyed by option name rather than by plot
-#: type, so the nine keys across all types need nine entries, not one per
+#: type, so the ten keys across all types need ten entries, not one per
 #: (type, key) pair.
 _FIELD_KIND: dict[str, str] = {
     "x": "column", "y": "column",
@@ -59,6 +60,7 @@ _FIELD_KIND: dict[str, str] = {
     "fit": "fit",
     "bins": "bins",
     "zoom": "bool",
+    "window": "window",
 }
 
 
@@ -359,6 +361,7 @@ class ReportsDialog(QDialog):
             "runs": list(_tl.RUN_MODES),
             "fit": _FIT_CURVES,
             "bins": _BINS,
+            "window": list(_spectrum.WINDOWS),
         }.get(kind, [])
         combo.addItems([str(i) for i in items])
         if value is not None:

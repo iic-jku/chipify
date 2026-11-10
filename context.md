@@ -23,6 +23,7 @@
 | `simulator.py` | Multiprocessing simulation engine (`NgspiceSimulator`, `VacaskSimulator`). File-based abort via `/tmp/sim_work/abort.flag`. |
 | `plot_manager.py` | All Matplotlib logic. Avoids GUI bloat. |
 | `data_loader.py` | Results loading / pass-fail / plot-column classification / history — shared by the engine, exporters, and GUI; headless, no GUI deps. |
+| `spectrum.py` | `amplitude_spectrum()` — the one FFT, behind the Plots tab's Spectrum view, the dashboard cell and `type: spectrum` report plots. Headless. |
 | `reports.py` | Vocabulary for the datasheet's `reports:` block: `PlotSpec` / `ReportsConfig` and the `PLOT_TYPES` registry. |
 | `report_service.py` | Renders that block headlessly to `out/reports/<timestamp>/` — the single path behind `--reports`, the GUI button and the one-click PDF (`config=pdf_only_config()`). |
 | `cli.py` | Entry point for headless execution or launching the GUI (`run_gui()` → Qt app). |
@@ -207,12 +208,20 @@ A declared analysis (`transient/dc/ac_signals`) that produced no waveform CSV is
 ### Editing `reports:` from the GUI (`gui_qt/widgets/reports_dialog.py`)
 *   Opened by **Reports…** in the Datasheet Editor toolbar, because the block belongs to the datasheet — chipify's paradigm is that a datasheet is fully buildable from the GUI.
 *   Persists through `editor_tab.set_document_key("reports", …)`, the same call the equations panel uses: one writer for top-level datasheet keys, and pending form/raw edits are synced first. An empty config renders as `None`, which removes the key instead of leaving an empty husk.
-*   The per-plot form is **generated from `reports.PLOT_TYPES`** — a new plot type gets a GUI for free and the dialog never becomes a second place that knows the plot vocabulary. `_FIELD_KIND` maps each option *key* (not each type) to a widget kind, so nine entries cover every type.
+*   The per-plot form is **generated from `reports.PLOT_TYPES`** — a new plot type gets a GUI for free and the dialog never becomes a second place that knows the plot vocabulary. `_FIELD_KIND` maps each option *key* (not each type) to a widget kind, so ten entries cover every type.
 *   Dropdown names come from the loaded run when there is one, else from the datasheet parsed through `validate_datasheet` — the block must be configurable before the first simulation.
 *   Values a freshly built combo *displays* are committed into the spec (`_commit_displayed`), because otherwise a field the user can plainly see filled in would be absent from the saved YAML and the schema would reject it on the next load.
 
+### Waveform views and the spectrum (`plot_manager.WAVEFORM_DRAWERS`, `spectrum.py`)
+*   A **view** is what an overlay draws; the analysis kind is whose CSVs it reads. `transient_loader.KIND_LABELS` maps the GUI labels to views, `VIEW_KINDS` maps each view to its kind, and `plot_manager.WAVEFORM_DRAWERS` is the one view → plotter table for the Plots tab, the dashboard cell and `report_service` (each used to carry its own copy). A report type names its view with `PlotType.view` when it is not its kind.
+*   The spectrum is a view of the **transient** data, not an analysis: no capture of its own, no testbench change. `draw_spectrum_plot` is `_draw_xy_overlay` with a per-curve `transform`, so run selection, grouping, `transient_equations` and the curve hover behave exactly as for the transient overlay.
+*   `spectrum.amplitude_spectrum` is the only FFT. It **resamples onto an even grid** first (ngspice/VACASK steps are uneven, and an FFT that treats them as even puts energy at the wrong frequencies) and returns single-sided peak amplitude with the window's coherent gain divided out.
+*   The grid is **half-open**: n − 1 mean steps from `tstart`, without the `tstop` sample, which for a periodic waveform repeats the start. A whole number of simulated periods then fills the FFT record exactly, and uniformly stepped data is used sample for sample. With the end point included the record was one step too long: on a real ngspice run that put -60 dB of leakage beside the tone with the rectangular window and read a -90 dB third harmonic as -79.5 dB. DC is kept unless `remove_dc`, which subtracts the mean of the *resampled* waveform: the mean of the simulator's samples leans toward its dense steps. `window:` values are validated against `spectrum.WINDOWS` in `schema._validate_reports`.
+*   The plot uses a **log frequency axis** and `remove_dc=True`, and leaves out bin 0. A transient is sampled far above the signal, so on a linear axis to Nyquist the fundamental and its harmonics shared the leftmost few percent of the plot; and with the mean left in, the window smeared a bias point over the lowest bins drawn (+2 dB at bin 1 for a 0.9 V output), where it can hide a fundamental only a few bins up.
+*   No TeX export: `supports_latex` is False, and the Plots tab disables its TeX button in the Spectrum view, because the overlay TeX exporter writes the captured time-domain CSVs and would label them as a spectrum. The dashboard cell has no window selector and uses Hann.
+
 ### Waveform overlay grouping (`plot_manager._OverlayStyle`)
-*   The Transient / DC sweep / Bode overlays share one colour-and-legend policy. Ungrouped, colour encodes the signal (or the run index for a single signal) and failing runs are red — unchanged.
+*   The Transient / DC sweep / Spectrum / Bode overlays share one colour-and-legend policy. Ungrouped, colour encodes the signal (or the run index for a single signal) and failing runs are red — unchanged.
 *   Passing `group_map` (`run_id -> value`, from `transient_loader.run_group_map`) plus `group_label` switches colour to the **group value**, line style to the signal, and turns pass/fail highlighting **off** — red would pull failing curves out of the grouping. Legend labels use `temp=27`, matching `draw_histogram`'s convention.
 *   The Plots tab and the dashboard's `Plots` cell both drive this through the same helpers; the cell's legacy `"Transient"` mode name is migrated in `apply_config`.
 

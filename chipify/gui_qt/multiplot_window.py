@@ -40,7 +40,7 @@ from chipify.uikit.state import AppState
 from chipify.gui_qt.services import canvas_menu
 from chipify.gui_qt.widgets.helpers import compact_combo, deferred
 from chipify.gui_qt.widgets.mpl_canvas import MplCanvas
-from chipify.plot_manager import PlotManager, param_plugin_modes
+from chipify.plot_manager import WAVEFORM_DRAWERS, PlotManager, param_plugin_modes
 
 log = logging.getLogger("chipify.gui_qt.multiplot")
 
@@ -343,14 +343,12 @@ class PlotCell(QFrame):
 
         Mirrors the Plots tab: same kind labels, same signal discovery, same
         grouping, all through the shared ``transient_loader`` helpers so the two
-        surfaces cannot drift apart.
+        surfaces cannot drift apart. The cell has no window selector, so its
+        spectrum uses the default window (Hann).
         """
-        kind = _tl.kind_for_label(self.kind_combo.currentText())
-        draw_fn = {
-            "transient": PlotManager.draw_transient_plot,
-            "dc": PlotManager.draw_dc_sweep,
-            "ac": PlotManager.draw_bode_plot,
-        }[kind]
+        label = self.kind_combo.currentText()
+        kind = _tl.kind_for_label(label)
+        draw_fn = WAVEFORM_DRAWERS[_tl.view_for_label(label)]
 
         sig = self.tran_signal_combo.currentText().strip()
         signals = ([sig] if sig not in ("", "All Signals")
