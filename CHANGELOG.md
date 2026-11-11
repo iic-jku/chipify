@@ -43,8 +43,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its X and Y axes, while the dashboard's scatter did. Both now offer the same
   list: swept inputs, measurements, then equation results. The Reports dialog
   also offers the datasheet's equation results before the first run.
-- A `type: scatter` report plot naming a column the run does not have wrote an
-  empty image without a word. It is now left out with a warning that names
+- A `scatter`, `corner_yield` or `tornado` report plot naming a column the run
+  does not have wrote an empty image (or a "Select a target measurement
+  first." note) without a word. It is now left out with a warning that names
   the column.
 - The PDF report's measurement summary never showed its fail-breakdown pie:
   the page had an empty axes below the table whenever runs failed. The call

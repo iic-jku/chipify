@@ -188,10 +188,12 @@ def _render_advanced(spec: PlotSpec, df, stim, theme, figsize=None):
     opts = spec.options
     x_col, y_col = str(opts.get("x", "")), str(opts.get("y", ""))
     group_col = str(opts.get("group") or "")
-    if spec.type == "scatter":
-        # The scatter draws nothing for a column the run lacks, which wrote
-        # an empty image without a warning.
-        for key, col in (("x", x_col), ("y", y_col)):
+    # A column the run lacks draws nothing (scatter, yield matrix) or a
+    # "Select a target measurement first." placeholder (tornado), and the
+    # report wrote that as a finished image without a warning.
+    for key in ("x", "y", "target"):
+        if key in spec.plot_type.required:
+            col = str(opts.get(key, ""))
             if col not in df.columns:
                 raise ValueError(f"{key}: column {col!r} is not in this run's results")
     fig, canvas = _new_figure(figsize)

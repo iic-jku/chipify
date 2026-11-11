@@ -192,13 +192,20 @@ def test_grouped_scatter_writes_png_svg_and_latex(tmp_path):
     assert legend == ["temp=-40", "temp=27", "temp=100"]
 
 
-def test_scatter_of_a_column_the_run_lacks_warns_instead_of_an_empty_image(tmp_path):
-    """The scatter drew nothing for an unknown column, and the report wrote
-    the empty figure without a warning."""
+@pytest.mark.parametrize("ptype,options", [
+    ("scatter", {"x": "gain", "y": "gain_x2"}),
+    ("corner_yield", {"x": "temp", "y": "gain_x2"}),
+    ("tornado", {"target": "gain_x2"}),
+])
+def test_a_column_the_run_lacks_warns_instead_of_a_placeholder_image(
+        tmp_path, ptype, options):
+    """The scatter and the yield matrix drew nothing for an unknown column and
+    the tornado drew a "select a target" note; the report wrote each as a
+    finished image without a warning."""
     stim = _stim()
     stim.reports = ReportsConfig(
-        formats=["png", "latex"],
-        plots=[PlotSpec("scatter", options={"x": "gain", "y": "gain_x2"})],
+        formats=["png"] + (["latex"] if ptype == "scatter" else []),
+        plots=[PlotSpec(ptype, options=options)],
     )
     result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
     assert result.files == []
