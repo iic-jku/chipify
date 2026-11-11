@@ -46,6 +46,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `type: scatter` report plot naming a column the run does not have wrote an
   empty image without a word. It is now left out with a warning that names
   the column.
+- The PDF report's measurement summary never showed its fail-breakdown pie:
+  the page had an empty axes below the table whenever runs failed. The call
+  drawing it raised an error that was silently ignored; a failure there is
+  now logged.
 - Choosing another datasheet in the GUI, or creating one with **New…**, threw
   away unsaved edits in the Datasheet Editor without a word: loading rereads
   the file. It now asks to save, discard or cancel; Cancel keeps the edits and

@@ -400,10 +400,13 @@ class PlotManager:
             ax = fig.add_subplot(111)
         else:
             ax = ax_dummy
-            # Remove stale secondary axes (e.g. old colorbars) that survive ax.clear().
-            # Otherwise corner/correlation axes accumulate when switching modes/tabs.
+            # Remove stale colorbars, which survive ax.clear() and otherwise
+            # accumulate when one axes is redrawn in another mode. Only
+            # colorbars: the PDF summary page draws its fail pie into an axes
+            # beside the measurement table, and removing every other axes
+            # took the table with it.
             for extra_ax in list(fig.axes):
-                if extra_ax is not ax:
+                if extra_ax is not ax and getattr(extra_ax, "_colorbar", None) is not None:
                     try:
                         fig.delaxes(extra_ax)
                     except Exception:

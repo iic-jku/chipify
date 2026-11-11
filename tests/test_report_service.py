@@ -481,6 +481,41 @@ def _dl_prepared():
     return _dl.prepare_results(_results())
 
 
+def test_summary_page_draws_the_fail_pie_beside_the_table(caplog):
+    """The pie call used a keyword draw_adv_plot does not have; the TypeError
+    was swallowed and the page showed an empty axes. Drawing it must also
+    keep the measurement table, which shares the figure."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib.patches import Wedge
+
+    from chipify import data_loader as _dl
+    from chipify import pdf_export
+    from chipify.uikit.services import measurements as meas
+
+    df = _results()
+    df["gain_pass"] = [True, True, True, False]       # one gain failure
+    df["pm_pass"] = [False, False, False, True]       # three pm failures
+    df["tb_overall_pass"] = df["gain_pass"] & df["pm_pass"]
+    df = _dl.prepare_results(df)
+    stim = _stim()
+    pages = []
+
+    class _Stub:
+        def savefig(self, fig, **_kw):
+            texts = [t.get_text() for a in fig.axes for t in a.texts]
+            wedges = [p for a in fig.axes for p in a.patches if isinstance(p, Wedge)]
+            pages.append((texts, wedges))
+
+    with caplog.at_level("WARNING", logger="chipify.pdf"):
+        pdf_export._add_table(_Stub(), meas.measurement_rows(df, stim), df, stim)
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
+    texts, wedges = pages[0]
+    assert "Parameter" in texts and "gain" in texts      # the table survived
+    assert len(wedges) == 2                              # one slice per failing spec
+    assert "25.0%" in texts and "75.0%" in texts
+
+
 # ── The PDF contains exactly the configured plots ─────────────────────────────
 
 def _pdf_pages(stim, df, out_root):

@@ -405,7 +405,7 @@ def _add_table(pdf: PdfPages, rows: list, valid_df: pd.DataFrame, stim):
                         fig=fig,
                         ax_dummy=pie_ax,
                         canvas=_DummyCanvas(),
-                        valid_df=valid_df,
+                        df=valid_df,
                         current_stim=stim,
                         mode="Fail Breakdown (Pie Chart)",
                         x_col="-",
@@ -415,8 +415,12 @@ def _add_table(pdf: PdfPages, rows: list, valid_df: pd.DataFrame, stim):
                         theme=_pdf_theme,
                     )
                     pie_ax.set_title("")
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 — the table page must still print
+                    # Never silent: a wrong keyword here raised a TypeError on
+                    # every report, and the bare pass left an empty axes where
+                    # the pie belongs for as long as nobody looked.
+                    logging.getLogger("chipify.pdf").warning(
+                        "Fail-breakdown pie could not be drawn.", exc_info=True)
             else:
                 fig.text(0.5, 0.12, "All runs passed specifications.",
                          ha="center", va="center", fontsize=12, color=GREEN, weight="bold")
