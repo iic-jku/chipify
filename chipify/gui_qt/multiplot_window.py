@@ -43,7 +43,8 @@ from chipify.uikit.state import AppState
 from chipify.gui_qt.services import canvas_menu
 from chipify.gui_qt.widgets.helpers import compact_combo, deferred
 from chipify.gui_qt.widgets.mpl_canvas import MplCanvas
-from chipify.plot_manager import WAVEFORM_DRAWERS, PlotManager, param_plugin_modes
+from chipify.plot_manager import (WAVEFORM_DRAWERS, PlotManager, param_plugin_modes,
+                                  xy_axis_options)
 
 log = logging.getLogger("chipify.gui_qt.multiplot")
 
@@ -282,8 +283,10 @@ class PlotCell(QFrame):
         # distribution (they're the sweep grid); they stay in "Group by" and
         # in the scatter X/Y axes below.
         params = list(dict.fromkeys(meas + cols.output_cols + list(derived_cols or [])))
-        # The Analytics tab's scatter list, so both surfaces offer the same axes.
-        xy = _dl.scatter_axis_columns(df, stim, derived_cols or [])
+        # The Analytics tab's lists for the current mode, so both surfaces
+        # offer the same axes (swept inputs only for the yield matrix).
+        xy = xy_axis_options(self.mode_combo.currentText(), df, stim,
+                             derived_cols or [])
 
         signals = ["All Signals"]
         for test in stim.tests:

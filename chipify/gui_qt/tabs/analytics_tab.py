@@ -31,7 +31,7 @@ from chipify.gui_qt.services import canvas_menu
 from chipify.gui_qt.services.throttle import Throttle
 from chipify.gui_qt.widgets.helpers import compact_combo, deferred
 from chipify.gui_qt.widgets.mpl_canvas import MplCanvas
-from chipify.plot_manager import PlotManager, param_plugin_modes
+from chipify.plot_manager import PlotManager, param_plugin_modes, xy_axis_options
 
 log = logging.getLogger("chipify.gui_qt.tabs.analytics")
 
@@ -188,13 +188,10 @@ class AnalyticsTab(QWidget):
         # measure: expression results are measurements too (limitless).
         meas_names = _dl.measurement_columns(df, stim)
 
-        mode = self.mode_combo.currentText()
-        if mode == "Corner Yield Matrix":
-            xy_opts = cols.sweep_params or ["-"]
-        else:
-            # The dashboard cell's list, scalar-equation results included.
-            xy_opts = _dl.scatter_axis_columns(
-                df, stim, self._state.derived_cols) or ["-"]
+        # The dashboard cell's lists: swept inputs for the yield matrix,
+        # every plottable column (equation results included) for the scatter.
+        xy_opts = xy_axis_options(self.mode_combo.currentText(), df, stim,
+                                  self._state.derived_cols) or ["-"]
         target_opts = meas_names or ["-"]
 
         self._set_items(self.x_combo, xy_opts, prefer_index=0)

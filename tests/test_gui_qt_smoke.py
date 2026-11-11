@@ -2072,3 +2072,29 @@ def test_reports_dialog_offers_scalar_equations_before_the_first_run():
     from chipify.gui_qt.widgets.reports_dialog import _Choices
     choices = _Choices(None, _EqSweepStim())
     assert "gain2" in choices.columns
+
+
+def test_corner_yield_axes_are_the_swept_inputs_in_both_windows(window):
+    """The dashboard's yield matrix shared the scatter's axis list and offered
+    measurements, one matrix row or column per sample."""
+    from chipify.gui_qt.multiplot_window import PlotCell
+    window.show_results(_failing_sweep_df(), _EqSweepStim(), switch_tab=False)
+    df, stim = window.app_state.active_df, window.app_state.current_stim
+    at = window.analytics_tab
+    cell = PlotCell(window.app_state, window.plot_theme, lambda _c: None)
+    try:
+        for mode in ("Corner Yield Matrix", "Scatter Plot", "Corner Yield Matrix"):
+            _select(at.mode_combo, mode)
+            at._apply_mode_visibility()
+            at._repopulate_options(df, stim)
+            _select(cell.mode_combo, mode)
+            cell._apply_mode_visibility()
+            cell.redraw(*_snapshot(window))
+            assert _items(cell.x_combo) == _items(at.x_combo), mode
+            assert _items(cell.y_combo) == _items(at.y_combo), mode
+            if mode == "Corner Yield Matrix":
+                assert _items(cell.x_combo) == ["temp", "vdd"]
+            else:
+                assert {"gain", "bw", "gain2"} <= set(_items(cell.x_combo))
+    finally:
+        cell.deleteLater()

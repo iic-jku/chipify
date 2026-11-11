@@ -85,6 +85,19 @@ def param_plugin_modes() -> set[str]:
         return set()
 
 
+def xy_axis_options(mode, df, stim, derived_cols=()) -> list[str]:
+    """X/Y choices for an Analytics *mode*, for the tab and the dashboard cell.
+
+    The Corner Yield Matrix pivots on discrete inputs only (``PlotColumns``),
+    so it offers the swept parameters; the scatter offers every plottable
+    column. The cell once shared the scatter's list with the matrix, which
+    then offered measurements: one row or column per sample.
+    """
+    if mode == "Corner Yield Matrix":
+        return _dl.compute_plot_cols(df, stim).sweep_params
+    return _dl.scatter_axis_columns(df, stim, derived_cols)
+
+
 def _adv_plot_columns(mode, x_col, y_col, target, plugin_param):
     """Measurement columns whose usability constrains the rows for *mode*."""
     if mode == "Scatter Plot":

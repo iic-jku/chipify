@@ -57,6 +57,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   TeX exports use the same colours. The grouped histogram also listed its
   groups in data order (`27, -40, 100`); it now sorts them like the other
   plots.
+- The Corner Yield Matrix in the Multi-plot dashboard offered every column
+  for its axes, measurements included, which gave one matrix row or column
+  per sample. Like the Analytics tab, it now offers the swept parameters.
 - Choosing another datasheet in the GUI, or creating one with **New…**, threw
   away unsaved edits in the Datasheet Editor without a word: loading rereads
   the file. It now asks to save, discard or cancel; Cancel keeps the edits and
