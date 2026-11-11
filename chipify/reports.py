@@ -51,13 +51,13 @@ class PlotType:
 
 #: Every plot type a ``reports:`` block may declare.
 #:
-#: ``supports_latex`` is False for most advanced plots on purpose: ``export_latex``
-#: only ships pgfplots generators for the distribution and the three waveform
-#: overlays. Asking for LaTeX elsewhere warns rather than failing, so the plot's
-#: other formats are still written.
+#: ``supports_latex`` is False where ``export_latex`` has no pgfplots generator
+#: yet (the other advanced plots and the spectrum). Asking for LaTeX there warns
+#: rather than failing, so the plot's other formats are still written.
 PLOT_TYPES: dict[str, PlotType] = {
     "scatter": PlotType(
-        "scatter", required=("x", "y"), adv_mode="Scatter Plot",
+        "scatter", required=("x", "y"), optional=("group",),
+        adv_mode="Scatter Plot", supports_latex=True,
     ),
     "corner_yield": PlotType(
         "corner_yield", required=("x", "y"), adv_mode="Corner Yield Matrix",

@@ -23,8 +23,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   waveform is resampled onto an even grid first; for a clean spectrum, bound
   the step and skip the settling in the testbench's `.tran`. There is no
   LaTeX export for it yet, and the dashboard cell always uses the Hann window.
+- **Grouping in the scatter plot**: a *Group* selector in the Analytics tab and
+  in the dashboard's scatter cell, and `group:` on a `type: scatter` plot in
+  `reports:`. The points are coloured by the value of a swept parameter
+  (`temp`, `corner`, …), in numeric order, and a failing point is then drawn
+  as a cross instead of red, so the verdict stays visible.
+- **TeX export of the scatter plot**: a *TeX Export* button in the Analytics
+  tab (Scatter Plot mode), and `latex` as a format of a `type: scatter` plot
+  in `reports:`. It writes a pgfplots `.tex` and its `.csv` with exactly the
+  plotted points, in the figure's colours and with its legend; a text axis,
+  such as a corner sweep, gets named ticks at the figure's positions.
+- **Export from the Multi-plot dashboard**: every cell has an export button
+  (the save icon) with *Image (PNG, SVG, …)* for any plot and *TeX* where the
+  matching main-window tab has it (histogram, scatter, transient, DC sweep,
+  Bode). Before, a dashboard plot could not be exported at all.
 
 ### Fixed
+- The scatter plot in the Analytics tab offered no scalar-equation results on
+  its X and Y axes, while the dashboard's scatter did. Both now offer the same
+  list: swept inputs, measurements, then equation results. The Reports dialog
+  also offers the datasheet's equation results before the first run.
+- A `type: scatter` report plot naming a column the run does not have wrote an
+  empty image without a word. It is now left out with a warning that names
+  the column.
 - Choosing another datasheet in the GUI, or creating one with **New…**, threw
   away unsaved edits in the Datasheet Editor without a word: loading rereads
   the file. It now asks to save, discard or cancel; Cancel keeps the edits and

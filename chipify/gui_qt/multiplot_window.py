@@ -23,9 +23,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +51,8 @@ _BASE_MODES = [
     "Histogram", "Scatter Plot", "Corner Yield Matrix", "Correlation Heatmap",
     "Sensitivity (Tornado)", "Fail Breakdown (Pie Chart)", "Plots",
 ]
+
+_SCATTER = "Scatter Plot"
 
 #: Cell mode this used to be called, kept so saved dashboards still open.
 _LEGACY_MODES = {"Transient": "Plots"}
@@ -116,6 +121,20 @@ class PlotCell(QFrame):
         # every mode's full name.
         self.mode_combo.setMinimumWidth(96)
         header.addWidget(self.mode_combo, stretch=1)
+        # The main window's Export… and TeX Export, for whatever the cell
+        # shows. One icon button with a menu: two text buttons widened every
+        # cell past a four-column dashboard (see the controls rows below).
+        self.btn_export = QToolButton()
+        self.btn_export.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self.btn_export.setToolTip("Export this plot (image or TeX)")
+        self.btn_export.setPopupMode(QToolButton.InstantPopup)
+        export_menu = QMenu(self.btn_export)
+        self.act_export = export_menu.addAction("Image (PNG, SVG, …)…")
+        self.act_export.triggered.connect(lambda _checked=False: self._export())
+        self.act_latex = export_menu.addAction("TeX (pgfplots CSV + .tex)")
+        self.act_latex.triggered.connect(lambda _checked=False: self._export_latex())
+        self.btn_export.setMenu(export_menu)
+        header.addWidget(self.btn_export)
         btn_remove = QPushButton("✕")
         btn_remove.setFixedWidth(28)
         btn_remove.clicked.connect(lambda: self._remove_cb(self))
@@ -186,6 +205,7 @@ class PlotCell(QFrame):
         for w in self._ctl_widgets:
             if isinstance(w, QComboBox):
                 w.currentIndexChanged.connect(deferred(self._request_redraw))
+        self.kind_combo.currentIndexChanged.connect(self._update_export_controls)
         self.tran_n_edit.editingFinished.connect(self._request_redraw)
         self.zoom_check.toggled.connect(self._request_redraw)
         self.all_check.toggled.connect(self._on_all_toggle)
@@ -202,7 +222,9 @@ class PlotCell(QFrame):
             for w in (self.param_combo, self.group_combo, self.dist_combo,
                       self.compare_combo, self.bins_combo, self.zoom_check):
                 vis[w] = True
-        elif mode in ("Scatter Plot", "Corner Yield Matrix"):
+        elif mode == _SCATTER:
+            vis[self.x_combo] = vis[self.y_combo] = vis[self.group_combo] = True
+        elif mode == "Corner Yield Matrix":
             vis[self.x_combo] = vis[self.y_combo] = True
         elif mode == "Sensitivity (Tornado)":
             vis[self.target_combo] = True
@@ -218,6 +240,22 @@ class PlotCell(QFrame):
         self.target_combo.setEnabled(
             not (mode in param_plugin_modes() and self.all_check.isChecked())
         )
+        self._update_export_controls()
+
+    def _latex_available(self) -> bool:
+        """True where the main window's matching tab offers TeX Export."""
+        mode = self.mode_combo.currentText()
+        if mode == "Plots":
+            # The overlay exporter writes the captured CSVs, which in the
+            # Spectrum view would be time-domain data under a spectrum's name.
+            return _tl.view_for_label(self.kind_combo.currentText()) != "spectrum"
+        return mode in ("Histogram", _SCATTER)
+
+    def _update_export_controls(self, *_a) -> None:
+        on = self._latex_available()
+        self.act_latex.setEnabled(on)
+        self.act_latex.setText("TeX (pgfplots CSV + .tex)" if on
+                               else "TeX (not available for this plot)")
 
     def _on_mode_change(self, *_a) -> None:
         self._apply_mode_visibility()
@@ -238,20 +276,14 @@ class PlotCell(QFrame):
         if df is None or stim is None:
             return
         cols = _dl.compute_plot_cols(df, stim)
-        meas = []
-        for test in stim.tests:
-            for v in test.value_lst:
-                if v.name in df.columns and v.name not in meas:
-                    meas.append(v.name)
-            # measure: expression results are measurements too (limitless).
-            for name in (getattr(test, "measure", None) or {}):
-                if name in df.columns and name not in meas:
-                    meas.append(name)
+        # measure: expression results are measurements too (limitless).
+        meas = _dl.measurement_columns(df, stim)
         # Histogram params: outputs only — input parameters make no sense as a
         # distribution (they're the sweep grid); they stay in "Group by" and
         # in the scatter X/Y axes below.
         params = list(dict.fromkeys(meas + cols.output_cols + list(derived_cols or [])))
-        xy = list(dict.fromkeys(sweep_params + meas + list(derived_cols or [])))
+        # The Analytics tab's scatter list, so both surfaces offer the same axes.
+        xy = _dl.scatter_axis_columns(df, stim, derived_cols or [])
 
         signals = ["All Signals"]
         for test in stim.tests:
@@ -329,6 +361,7 @@ class PlotCell(QFrame):
                     self.x_combo.currentText(), self.y_combo.currentText(),
                     target, bg_color=theme["bg"], theme=theme,
                     plugin_param=plugin_param,
+                    group_col=self.group_combo.currentText(),
                 )
         except Exception as exc:  # noqa: BLE001
             log.debug("PlotCell redraw failed: %s", exc)
@@ -338,17 +371,14 @@ class PlotCell(QFrame):
                     color="#e74c3c", fontsize=8, wrap=True, transform=ax.transAxes)
             canvas.draw_idle()
 
-    def _draw_waveform(self, df, stim, theme) -> None:
-        """Overlay one analysis kind's waveforms, optionally grouped.
+    def _waveform_selection(self, stim) -> dict:
+        """What the ``Plots`` cell draws: kind, view, directory, runs, signals.
 
-        Mirrors the Plots tab: same kind labels, same signal discovery, same
-        grouping, all through the shared ``transient_loader`` helpers so the two
-        surfaces cannot drift apart. The cell has no window selector, so its
-        spectrum uses the default window (Hann).
+        One place for the drawing and the TeX export, so the file holds the
+        curves on screen.
         """
         label = self.kind_combo.currentText()
         kind = _tl.kind_for_label(label)
-        draw_fn = WAVEFORM_DRAWERS[_tl.view_for_label(label)]
 
         sig = self.tran_signal_combo.currentText().strip()
         signals = ([sig] if sig not in ("", "All Signals")
@@ -363,17 +393,81 @@ class PlotCell(QFrame):
 
         adir = (_tl.resolve_analysis_dir(df, settings.OUT_DIR, kind)
                 if df is not None else "")
-        group_text = self.group_combo.currentText()
-        group_col = "" if group_text in ("", "None") else group_text
         equations = _eq_svc.transient_equations(stim) if kind == "transient" else []
+        return {"df": df, "kind": kind, "view": _tl.view_for_label(label),
+                "adir": adir, "run_ids": run_ids, "signals": signals,
+                "equations": equations}
 
-        line_map = draw_fn(
-            self.canvas.figure, self.canvas.canvas, adir, run_ids, signals,
+    def _current_group(self) -> str:
+        text = self.group_combo.currentText()
+        return "" if text in ("", "None") else text
+
+    def _draw_waveform(self, df, stim, theme) -> None:
+        """Overlay one analysis kind's waveforms, optionally grouped.
+
+        Mirrors the Plots tab: same kind labels, same signal discovery, same
+        grouping, all through the shared ``transient_loader`` helpers so the two
+        surfaces cannot drift apart. The cell has no window selector, so its
+        spectrum uses the default window (Hann).
+        """
+        sel = self._waveform_selection(stim)
+        df = sel["df"]
+        group_col = self._current_group()
+        line_map = WAVEFORM_DRAWERS[sel["view"]](
+            self.canvas.figure, self.canvas.canvas, sel["adir"], sel["run_ids"],
+            sel["signals"],
             pass_map=_tl.run_pass_map(df), bg_color=theme["bg"],
-            equations=equations, theme=theme,
+            equations=sel["equations"], theme=theme,
             group_map=_tl.run_group_map(df, group_col), group_label=group_col,
         )
         self._curve_state_obj = CurveHoverState(line_map, df, stim)
+
+    # ── Export ────────────────────────────────────────────────────────────────
+
+    def _export_name(self) -> str:
+        """The file name the main window's tab suggests for the same plot."""
+        mode = self.mode_combo.currentText()
+        if mode == "Histogram":
+            return f"histogram_{self.param_combo.currentText()}"
+        if mode == "Plots":
+            return self.kind_combo.currentText().lower().replace(" ", "_")
+        return mode
+
+    def _export(self) -> None:
+        from chipify.gui_qt.services.figure_export import export_figure
+        export_figure(self, self.canvas.figure, self._export_name(),
+                      self._plot_theme())
+
+    def _export_latex(self) -> None:
+        """Write what the cell shows as pgfplots CSV + .tex, through the same
+        exporters as the Histogram, Analytics and Plots tabs."""
+        from chipify.gui_qt.services import latex_export as _lx
+
+        mode = self.mode_combo.currentText()
+        stim = self._state.current_stim
+        if not self._latex_available():
+            return
+        if mode == _SCATTER:
+            _lx.export_scatter_latex(
+                self, self._scatter_df, self.x_combo.currentText(),
+                self.y_combo.currentText(), self.group_combo.currentText())
+        elif mode == "Histogram":
+            df = self._state.active_df
+            param = self.param_combo.currentText()
+            data = None
+            if df is not None and param and param != "-":
+                plot_df = _dl.plot_rows(df, stim, [param])
+                if param in plot_df.columns:
+                    data = plot_df[param].dropna()
+            bins_text = self.bins_combo.currentText()
+            bins = "auto" if bins_text == "Auto" else int(bins_text)
+            _lx.export_histogram_latex(self, param, data,
+                                       self.dist_combo.currentText(), bins)
+        else:  # Plots
+            sel = self._waveform_selection(stim)
+            _lx.export_overlay_latex(self, sel["kind"], sel["adir"],
+                                     sel["run_ids"], sel["signals"],
+                                     sel["equations"])
 
     # ── Scatter / curve hover ─────────────────────────────────────────────────
 

@@ -1866,3 +1866,209 @@ def test_dashboard_cell_hovers_curves_and_points_in_the_right_mode(window, tmp_p
         assert cell._curve_state() is None          # curve manager stands down
     finally:
         mp.close()
+
+
+# ── Scatter: equation results, grouping and TeX, the same in both windows ────
+
+class _EqSweepStim(_SweepStim):
+    """Swept temp/vdd plus the scalar equation gain2 = gain * 2."""
+
+    def __init__(self):
+        super().__init__()
+        # Non-empty, so equation_service does not fall back to settings.json.
+        self.equations = [{"name": "gain2", "expr": "gain * 2"}]
+        self.transient_equations = [{"name": "zero", "expr": "0"}]
+
+
+def _failing_sweep_df():
+    """_sweep_df with run 4 (temp 27) failing its testbench's spec."""
+    df = _sweep_df()
+    df.loc[4, "gain_pass"] = False
+    df["tb_fake__error"] = "None"
+    df["tb_fake_overall_pass"] = df["gain_pass"] & df["bw_pass"]
+    return df
+
+
+def _items(combo):
+    return [combo.itemText(i) for i in range(combo.count())]
+
+
+def _snapshot(window):
+    """What the dashboard hands a cell (MultiPlotWindow.data_snapshot)."""
+    from chipify import data_loader as _dl
+    df, stim = window.app_state.active_df, window.app_state.current_stim
+    return (df, stim, _dl.compute_plot_cols(df, stim).sweep_params,
+            window.app_state.derived_cols)
+
+
+def _select(combo, value) -> None:
+    combo.blockSignals(True)
+    combo.setCurrentText(value)
+    combo.blockSignals(False)
+
+
+def _analytics_scatter(window, x="gain", y="bw", group="None"):
+    at = window.analytics_tab
+    _select(at.mode_combo, "Scatter Plot")
+    at._apply_mode_visibility()
+    at._repopulate_options(window.app_state.active_df, window.app_state.current_stim)
+    for combo, value in ((at.x_combo, x), (at.y_combo, y), (at.group_combo, group)):
+        _select(combo, value)
+    at._redraw()
+    return at
+
+
+def _cell_scatter(window, x="gain", y="bw", group="None"):
+    from chipify.gui_qt.multiplot_window import PlotCell
+    cell = PlotCell(window.app_state, window.plot_theme, lambda _c: None)
+    _select(cell.mode_combo, "Scatter Plot")
+    cell._apply_mode_visibility()
+    cell.redraw(*_snapshot(window))          # populates the option lists
+    for combo, value in ((cell.x_combo, x), (cell.y_combo, y),
+                         (cell.group_combo, group)):
+        _select(combo, value)
+    cell.redraw(*_snapshot(window))
+    return cell
+
+
+def _legend(canvas):
+    return [t.get_text() for t in canvas.figure.axes[0].get_legend().get_texts()]
+
+
+def test_scatter_axes_offer_scalar_equation_results_in_both_windows(window):
+    """The Analytics tab left out the equation results the dashboard offered."""
+    window.show_results(_failing_sweep_df(), _EqSweepStim(), switch_tab=False)
+    assert "gain2" in window.app_state.derived_cols
+
+    at = _analytics_scatter(window, x="temp", y="gain2")
+    assert "gain2" in _items(at.x_combo)
+    assert at.y_combo.currentText() == "gain2"
+    assert at._sc_plot is not None and len(at._scatter_df) == 9
+
+    cell = _cell_scatter(window, x="temp", y="gain2")
+    try:
+        assert _items(cell.x_combo) == _items(at.x_combo)
+        assert _items(cell.y_combo) == _items(at.y_combo)
+        assert cell._sc_plot is not None and len(cell._scatter_df) == 9
+    finally:
+        cell.deleteLater()
+
+
+def test_scatter_grouping_is_the_same_in_both_windows(window):
+    window.show_results(_failing_sweep_df(), _EqSweepStim(), switch_tab=False)
+    at = _analytics_scatter(window, group="temp")
+    assert not at.group_combo.isHidden()
+    assert _items(at.group_combo) == ["None", "temp", "vdd"]
+    tab_legend = _legend(at.canvas)
+    assert tab_legend == ["temp=-40", "temp=27", "temp=85", "Fail"]
+
+    cell = _cell_scatter(window, group="temp")
+    try:
+        assert not cell.group_combo.isHidden()
+        assert _legend(cell.canvas) == tab_legend
+        assert (cell._sc_plot.get_facecolors()
+                == at._sc_plot.get_facecolors()).all()
+        assert len(cell._sc_plot.get_paths()) == len(at._sc_plot.get_paths()) == 9
+    finally:
+        cell.deleteLater()
+
+    # Among the Analytics modes, grouping belongs to the scatter only.
+    _select(at.mode_combo, "Corner Yield Matrix")
+    at._apply_mode_visibility()
+    assert at.group_combo.isHidden()
+
+
+def test_scatter_tex_export_is_the_same_file_from_both_windows(window, tmp_path,
+                                                              monkeypatch):
+    from chipify import settings
+    from chipify.gui_qt.services import latex_export
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(latex_export.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(latex_export.QMessageBox, "critical", lambda *a, **k: None)
+
+    window.show_results(_failing_sweep_df(), _EqSweepStim(), switch_tab=False)
+    at = _analytics_scatter(window, group="temp")
+    assert at.btn_latex.isEnabled()
+    at._export_latex()
+    tex = tmp_path / "latex" / "scatter_gain_vs_bw_by_temp_plot.tex"
+    csv = tex.with_name("scatter_gain_vs_bw_by_temp_plot.csv")
+    assert tex.exists() and csv.exists()
+    from_tab = (tex.read_text(encoding="utf-8"), csv.read_text(encoding="utf-8"))
+    assert "\\addlegendentry{temp=27}" in from_tab[0]
+    tex.unlink()
+    csv.unlink()
+
+    cell = _cell_scatter(window, group="temp")
+    try:
+        assert cell.act_latex.isEnabled()
+        cell._export_latex()
+        assert (tex.read_text(encoding="utf-8"),
+                csv.read_text(encoding="utf-8")) == from_tab
+    finally:
+        cell.deleteLater()
+
+    # The other Analytics modes have no pgfplots generator yet.
+    _select(at.mode_combo, "Correlation Heatmap")
+    at._apply_mode_visibility()
+    assert not at.btn_latex.isEnabled()
+
+
+def test_dashboard_cell_offers_the_main_windows_exports(window, tmp_path,
+                                                       monkeypatch):
+    """A cell had no export at all: no PNG/SVG, no TeX, for any mode."""
+    from chipify import settings
+    from chipify.gui_qt.multiplot_window import PlotCell
+    from chipify.gui_qt.services import figure_export, latex_export
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(latex_export.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(latex_export.QMessageBox, "critical", lambda *a, **k: None)
+
+    df, stim = _waveform_results(tmp_path)
+    window.show_results(df, stim, switch_tab=False)
+    cell = PlotCell(window.app_state, window.plot_theme, lambda _c: None)
+    try:
+        # TeX exactly where the matching main-window tab has it.
+        for mode, enabled in (("Histogram", True), ("Scatter Plot", True),
+                              ("Corner Yield Matrix", False),
+                              ("Correlation Heatmap", False),
+                              ("Sensitivity (Tornado)", False),
+                              ("Fail Breakdown (Pie Chart)", False),
+                              ("Plots", True)):
+            _select(cell.mode_combo, mode)
+            cell._apply_mode_visibility()
+            assert cell.act_latex.isEnabled() is enabled, mode
+        cell.kind_combo.setCurrentText("Spectrum")       # as in the Plots tab
+        assert not cell.act_latex.isEnabled()
+        cell.kind_combo.setCurrentText("Transient")
+        assert cell.act_latex.isEnabled()
+
+        # Plots cell: the transient overlay through the Plots tab's exporter.
+        cell.redraw(*_snapshot(window))
+        cell._export_latex()
+        assert (tmp_path / "latex" / "transient_plot.tex").exists()
+
+        # Histogram cell: the Histogram tab's exporter and file name.
+        _select(cell.mode_combo, "Histogram")
+        cell._apply_mode_visibility()
+        cell.redraw(*_snapshot(window))
+        _select(cell.param_combo, "gain")
+        cell._export_latex()
+        assert (tmp_path / "latex" / "gain_plot.tex").exists()
+
+        # Export… writes the figure through the exporter registry.
+        out = tmp_path / "cell.svg"
+        monkeypatch.setattr(
+            figure_export.QFileDialog, "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(out), "SVG (*.svg)")),
+        )
+        cell.redraw(*_snapshot(window))
+        cell._export()
+        assert out.exists() and out.stat().st_size > 0
+    finally:
+        cell.deleteLater()
+
+
+def test_reports_dialog_offers_scalar_equations_before_the_first_run():
+    from chipify.gui_qt.widgets.reports_dialog import _Choices
+    choices = _Choices(None, _EqSweepStim())
+    assert "gain2" in choices.columns

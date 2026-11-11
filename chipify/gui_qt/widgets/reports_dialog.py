@@ -90,6 +90,12 @@ class _Choices:
             for c in cols.output_cols:
                 if c not in self.measurements:
                     self.measurements.append(c)
+        # Scalar-equation results are plottable too. A loaded run carries them
+        # as columns (above); before the first run they come from the datasheet.
+        for eq in getattr(stim, "equations", None) or []:
+            name = str((eq or {}).get("name") or "").strip()
+            if name and name not in self.measurements:
+                self.measurements.append(name)
         self.columns = list(dict.fromkeys(self.sweeps + self.measurements))
 
     def signals(self, plot_type: str) -> list[str]:

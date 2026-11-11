@@ -91,6 +91,8 @@ def test_full_block_parses():
     ("reports:\n  plots: [{type: spectrum, window: kaiser}]",
      "reports.plots[0].window: unknown window 'kaiser'"),
     ("reports:\n  plots: [{type: transient, window: hann}]", "unknown key 'window'"),
+    ("reports:\n  plots: [{type: corner_yield, x: temp, y: vdd, group: temp}]",
+     "unknown key 'group'"),
 ])
 def test_invalid_blocks_name_the_offending_path(block, fragment):
     with pytest.raises(SchemaError) as exc:
@@ -159,12 +161,48 @@ def test_registry_and_test_matrix_stay_in_step():
 def test_latex_on_an_unsupported_type_warns_but_keeps_the_other_formats(tmp_path):
     stim = _stim()
     stim.reports = ReportsConfig(
-        plots=[PlotSpec("scatter", formats=["png", "latex"],
-                        options={"x": "gain", "y": "pm"})],
+        plots=[PlotSpec("tornado", formats=["png", "latex"],
+                        options={"target": "gain"})],
     )
     result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
     assert [f.suffix for f in result.files] == [".png"]
-    assert any("LaTeX" in w and "scatter" in w for w in result.warnings)
+    assert any("LaTeX" in w and "tornado" in w for w in result.warnings)
+
+
+def test_grouped_scatter_writes_png_svg_and_latex(tmp_path):
+    stim = _stim("""
+        reports:
+          formats: [png, svg, latex]
+          plots: [{type: scatter, x: gain, y: pm, group: temp}]
+    """)
+    assert stim.reports.plots[0].options["group"] == "temp"
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
+    assert not result.warnings, result.warnings
+    names = sorted(f.name for f in result.files)
+    assert names == ["scatter_gain_vs_pm_by_temp.png",
+                     "scatter_gain_vs_pm_by_temp.svg",
+                     "scatter_gain_vs_pm_by_temp_plot.csv",
+                     "scatter_gain_vs_pm_by_temp_plot.tex"]
+    tex = next(f for f in result.files if f.suffix == ".tex").read_text(encoding="utf-8")
+    assert "\\addlegendentry{temp=-40}" in tex and "grouped by temp" in tex
+    # The images come from this figure; it must be grouped too, not only the TeX.
+    fig, _latex = rs.render_spec(stim.reports.plots[0], _results(), stim,
+                                 out_root=tmp_path)
+    legend = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert legend == ["temp=-40", "temp=27", "temp=100"]
+
+
+def test_scatter_of_a_column_the_run_lacks_warns_instead_of_an_empty_image(tmp_path):
+    """The scatter drew nothing for an unknown column, and the report wrote
+    the empty figure without a warning."""
+    stim = _stim()
+    stim.reports = ReportsConfig(
+        formats=["png", "latex"],
+        plots=[PlotSpec("scatter", options={"x": "gain", "y": "gain_x2"})],
+    )
+    result = rs.generate_reports(_results(), stim, "d.yaml", tmp_path)
+    assert result.files == []
+    assert any("gain_x2" in w and "not in this run" in w for w in result.warnings)
 
 
 def test_histogram_latex_writes_the_pgfplots_pair(tmp_path):

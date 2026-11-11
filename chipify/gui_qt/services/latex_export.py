@@ -3,10 +3,11 @@
 latex_export.py – Qt wiring for the pgfplots/LaTeX exporters.
 
 Surfaces the framework-agnostic generators in :mod:`chipify.export_latex` to the
-Qt tabs, mirroring the legacy CustomTkinter "TeX Export" buttons. Both the
-histogram distribution and the transient/DC/Bode overlays write a ``.csv`` plus
-a ``.tex`` into ``OUT_DIR/latex/``; this module owns the directory, the
-dispatch, and all user-facing messaging so the tab methods stay thin.
+Qt tabs and the dashboard cells, mirroring the legacy CustomTkinter "TeX
+Export" buttons. The histogram distribution, the scatter and the
+transient/DC/Bode overlays each write a ``.csv`` plus a ``.tex`` into
+``OUT_DIR/latex/``; this module owns the directory, the dispatch, and all
+user-facing messaging so the tab methods stay thin.
 """
 from __future__ import annotations
 
@@ -108,4 +109,47 @@ def export_overlay_latex(
         QMessageBox.critical(parent, "TeX Export", f"Export failed:\n{exc}")
         return
     log.info("Exported %s overlay LaTeX to %s", kind, out_dir)
+    QMessageBox.information(parent, "TeX Export", f"Exported:\n  {tex_path}\n  {csv_path}")
+
+
+def export_scatter_latex(
+    parent: QWidget,
+    rows,
+    x_col: str,
+    y_col: str,
+    group_col: str = "",
+) -> None:
+    """Write the drawn scatter as pgfplots CSV + .tex.
+
+    *rows* is the frame the scatter drew (``draw_adv_plot``'s second return
+    value), so the export holds exactly the points on screen. The file is named
+    like the same plot in a datasheet's ``reports:`` block.
+    """
+    if rows is None or len(rows) == 0:
+        QMessageBox.information(
+            parent, "TeX Export",
+            "Nothing to export — draw a scatter plot with an X and a Y first.",
+        )
+        return
+
+    from chipify import export_latex
+    from chipify.report_service import default_plot_name
+    from chipify.reports import PlotSpec
+
+    group = "" if group_col in ("", "None") else group_col
+    stem = default_plot_name(PlotSpec(
+        "scatter", options={"x": x_col, "y": y_col, "group": group}))
+    out_dir = _latex_dir()
+    try:
+        csv_path, tex_path = export_latex.generate_scatter_latex_export(
+            out_dir, stem, rows, x_col, y_col, group,
+        )
+    except ValueError as exc:
+        QMessageBox.information(parent, "TeX Export", str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Scatter LaTeX export failed: %s", exc)
+        QMessageBox.critical(parent, "TeX Export", f"Export failed:\n{exc}")
+        return
+    log.info("Exported scatter LaTeX to %s", out_dir)
     QMessageBox.information(parent, "TeX Export", f"Exported:\n  {tex_path}\n  {csv_path}")

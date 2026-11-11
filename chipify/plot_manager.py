@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.markers import MarkerStyle
+from chipify import data_loader as _dl
 from chipify import settings
 
 log = logging.getLogger("chipify.plot_manager")
@@ -98,18 +100,14 @@ _FAIL_COLOR = "#e74c3c"
 #: Line styles cycled per signal when colour is already spoken for by a group.
 _GROUP_LINESTYLES = ["-", "--", "-.", ":"]
 
+#: The scatter's passing-point colour (``export_latex.SCATTER_PASS_HEX``).
+_PASS_COLOR = "#2ecc71"
 
-def _sort_group_values(values):
-    """Group values in a sensible order: numeric when they parse, else text.
 
-    Without this a temperature sweep legends as ``-40, 100, 27`` (string sort),
-    which reads as a bug to anyone looking at the plot.
-    """
-    vals = list(values)
-    try:
-        return sorted(vals, key=lambda v: float(v))
-    except (TypeError, ValueError):
-        return sorted(vals, key=str)
+def _marker_path(marker: str):
+    """The path ``ax.scatter`` draws for *marker*, in marker units."""
+    style = MarkerStyle(marker)
+    return style.get_path().transformed(style.get_transform())
 
 
 class _OverlayStyle:
@@ -140,7 +138,7 @@ class _OverlayStyle:
         self.sig_color = {sig: base[i % 10] for i, sig in enumerate(self.signals)}
 
         if self.grouped:
-            self.group_values = _sort_group_values(
+            self.group_values = _dl.sort_group_values(
                 {self.group_map[r] for r in run_ids if r in self.group_map}
             )
             palette = plt.cm.tab10(np.linspace(0, 1, max(10, len(self.group_values))))
@@ -384,8 +382,10 @@ class PlotManager:
         canvas.draw()
 
     @staticmethod
-    def draw_adv_plot(fig, ax_dummy, canvas, df, current_stim, mode, x_col, y_col, target, bg_color="#2b2b2b", theme=None, plugin_param=None):
-        from chipify import data_loader as _dl
+    def draw_adv_plot(fig, ax_dummy, canvas, df, current_stim, mode, x_col, y_col, target, bg_color="#2b2b2b", theme=None, plugin_param=None, group_col=None):
+        """Draw one Analytics mode. *group_col* colours the scatter's points
+        by that column's value (a swept input such as ``temp``); the other
+        modes ignore it."""
 
         # Full frame in, scoped here per mode (see _adv_plot_columns) so one
         # broken testbench costs only its own curves.
@@ -419,21 +419,50 @@ class PlotManager:
             if x_col not in valid_df.columns or y_col not in valid_df.columns: return None, None
             # effective_pass, not global_pass: global_pass ANDs every
             # testbench, so an unrelated broken one would paint every point red.
-            pass_mask = _dl.effective_pass(valid_df).fillna(0.0) > 0.5
-            colors = np.where(pass_mask, '#2ecc71', '#e74c3c')
+            pass_mask = _dl.scatter_pass_mask(valid_df)
+            group = _dl.group_column(valid_df, group_col)
+            if group:
+                # Colour is the group value, so the verdict moves to the marker
+                # shape: a failing point is a cross. Unlike the waveform
+                # overlays, which drop pass/fail when grouped, a shmoo plot
+                # without its verdict would lose what it is for.
+                group_values = _dl.sort_group_values(valid_df[group].dropna().unique())
+                group_color = {v: plt.cm.tab10(i % 10) for i, v in enumerate(group_values)}
+                colors = [group_color.get(v, "gray") for v in valid_df[group]]
+            else:
+                colors = np.where(pass_mask, _PASS_COLOR, _FAIL_COLOR)
 
             sc_plot = ax.scatter(valid_df[x_col], valid_df[y_col], c=colors, alpha=0.7, edgecolors=fg, linewidths=0.5, picker=5)
+            if group and not pass_mask.all():
+                # One collection with a path per point rather than one scatter
+                # per marker: the hover maps the artist's point index to a row
+                # of scatter_df, which a second collection would break.
+                sc_plot.set_paths([_marker_path("o") if ok else _marker_path("X")
+                                   for ok in pass_mask])
             scatter_df = valid_df.copy()
 
             ax.set_xlabel(x_col, color=fg)
             ax.set_ylabel(y_col, color=fg)
-            ax.set_title(f"Interactive Shmoo Plot: {y_col} vs {x_col}", color=fg, pad=10)
+            ax.set_title(f"Interactive Shmoo Plot: {y_col} vs {x_col}"
+                         + (f"  grouped by {group}" if group else ""),
+                         color=fg, pad=10)
             ax.grid(True, linestyle='--', alpha=0.3, color=th["grid"])
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
 
-            legend_elements = [Line2D([0], [0], marker='o', color='w', markerfacecolor='#2ecc71', label='Pass', markersize=8),
-                               Line2D([0], [0], marker='o', color='w', markerfacecolor='#e74c3c', label='Fail', markersize=8)]
+            if group:
+                legend_elements = [
+                    Line2D([0], [0], marker='o', color='w', markerfacecolor=group_color[v],
+                           label=f"{group}={v}", markersize=8)
+                    for v in group_values
+                ]
+                if not pass_mask.all():
+                    legend_elements.append(
+                        Line2D([0], [0], marker='X', color='w', markerfacecolor='gray',
+                               label='Fail', markersize=8))
+            else:
+                legend_elements = [Line2D([0], [0], marker='o', color='w', markerfacecolor=_PASS_COLOR, label='Pass', markersize=8),
+                                   Line2D([0], [0], marker='o', color='w', markerfacecolor=_FAIL_COLOR, label='Fail', markersize=8)]
             leg = ax.legend(handles=legend_elements, facecolor=th["legend_bg"], edgecolor=th["legend_edge"])
             for t in leg.get_texts():
                 t.set_color(th["legend_text"])

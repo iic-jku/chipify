@@ -42,7 +42,8 @@ _BASE_MODES = [
     "Correlation Heatmap",
     "Sensitivity (Tornado)",
 ]
-_XY_MODES = {"Scatter Plot", "Corner Yield Matrix"}
+_SCATTER = "Scatter Plot"
+_XY_MODES = {_SCATTER, "Corner Yield Matrix"}
 _TARGET_MODES = {"Sensitivity (Tornado)"}
 
 
@@ -98,7 +99,14 @@ class AnalyticsTab(QWidget):
         self.y_combo = QComboBox()
         self.lbl_target = QLabel("Target:")
         self.target_combo = QComboBox()
-        for _c in (self.x_combo, self.y_combo, self.target_combo):
+        self.lbl_group = QLabel("Group:")
+        self.group_combo = QComboBox()
+        self.group_combo.addItems(["None"])
+        self.group_combo.setToolTip(
+            "Colour the points by a swept input parameter (temp, corner, …); "
+            "failing points are then drawn as crosses."
+        )
+        for _c in (self.x_combo, self.y_combo, self.target_combo, self.group_combo):
             compact_combo(_c)
         self.all_params_check = QCheckBox("All measurements")
         self.all_params_check.setToolTip(
@@ -106,19 +114,23 @@ class AnalyticsTab(QWidget):
             "single selected one."
         )
         for w in (self.lbl_x, self.x_combo, self.lbl_y, self.y_combo,
+                  self.lbl_group, self.group_combo,
                   self.lbl_target, self.target_combo, self.all_params_check):
             controls.addWidget(w)
         controls.addStretch(1)
         self.btn_export = QPushButton("Export…")
         self.btn_export.clicked.connect(self._export)
         controls.addWidget(self.btn_export)
+        self.btn_latex = QPushButton("TeX Export")
+        self.btn_latex.clicked.connect(self._export_latex)
+        controls.addWidget(self.btn_latex)
         layout.addLayout(controls)
 
         self.canvas = MplCanvas(figsize=(8, 5))
         layout.addWidget(self.canvas, stretch=1)
 
         self.mode_combo.currentIndexChanged.connect(deferred(self._on_mode_change))
-        for combo in (self.x_combo, self.y_combo, self.target_combo):
+        for combo in (self.x_combo, self.y_combo, self.target_combo, self.group_combo):
             combo.currentIndexChanged.connect(deferred(self._redraw))
         self.all_params_check.toggled.connect(self._on_all_params_toggle)
         self._apply_mode_visibility()
@@ -144,8 +156,15 @@ class AnalyticsTab(QWidget):
             w.setVisible(xy)
         for w in (self.lbl_target, self.target_combo):
             w.setVisible(tgt)
+        scatter = mode == _SCATTER
+        for w in (self.lbl_group, self.group_combo):
+            w.setVisible(scatter)
         self.all_params_check.setVisible(param_mode)
         self.target_combo.setEnabled(not (param_mode and self.all_params_check.isChecked()))
+        # The scatter is the one Analytics mode with a pgfplots generator.
+        self.btn_latex.setEnabled(scatter)
+        self.btn_latex.setToolTip(
+            "" if scatter else "TeX export is available for the scatter plot.")
 
     def _on_all_params_toggle(self, *_a) -> None:
         self._apply_mode_visibility()
@@ -166,26 +185,22 @@ class AnalyticsTab(QWidget):
         if df is None or stim is None:
             return
         cols = _dl.compute_plot_cols(df, stim)
-        meas_names: list[str] = []
-        for test in stim.tests:
-            for v in test.value_lst:
-                if v.name in df.columns and v.name not in meas_names:
-                    meas_names.append(v.name)
-            # measure: expression results are measurements too (limitless).
-            for name in (getattr(test, "measure", None) or {}):
-                if name in df.columns and name not in meas_names:
-                    meas_names.append(name)
+        # measure: expression results are measurements too (limitless).
+        meas_names = _dl.measurement_columns(df, stim)
 
         mode = self.mode_combo.currentText()
         if mode == "Corner Yield Matrix":
             xy_opts = cols.sweep_params or ["-"]
         else:
-            xy_opts = list(dict.fromkeys(cols.sweep_params + meas_names)) or ["-"]
+            # The dashboard cell's list, scalar-equation results included.
+            xy_opts = _dl.scatter_axis_columns(
+                df, stim, self._state.derived_cols) or ["-"]
         target_opts = meas_names or ["-"]
 
         self._set_items(self.x_combo, xy_opts, prefer_index=0)
         self._set_items(self.y_combo, xy_opts, prefer_index=1)
         self._set_items(self.target_combo, target_opts, prefer_index=0)
+        self._set_items(self.group_combo, ["None"] + cols.sweep_params)
 
     @staticmethod
     def _set_items(combo: QComboBox, items: list[str], prefer_index: int = 0) -> None:
@@ -229,6 +244,7 @@ class AnalyticsTab(QWidget):
             self.y_combo.currentText(),
             target,
             bg_color=theme["bg"], theme=theme, plugin_param=plugin_param,
+            group_col=self.group_combo.currentText(),
         )
         # draw_adv_plot did fig.clf() — drop the stale tooltip annotation.
         self._hover.invalidate()
@@ -236,7 +252,7 @@ class AnalyticsTab(QWidget):
     # ── Scatter hover / click ─────────────────────────────────────────────────
 
     def _hover_state(self):
-        if self.mode_combo.currentText() != "Scatter Plot":
+        if self.mode_combo.currentText() != _SCATTER:
             return None
         if self._sc_plot is None or self._scatter_df is None:
             return None
@@ -254,4 +270,13 @@ class AnalyticsTab(QWidget):
         export_figure(
             self, self.canvas.figure,
             self.mode_combo.currentText(), self._plot_theme(),
+        )
+
+    def _export_latex(self) -> None:
+        """Export the drawn scatter as pgfplots CSV + .tex."""
+        from chipify.gui_qt.services.latex_export import export_scatter_latex
+        rows = self._scatter_df if self.mode_combo.currentText() == _SCATTER else None
+        export_scatter_latex(
+            self, rows, self.x_combo.currentText(), self.y_combo.currentText(),
+            self.group_combo.currentText(),
         )

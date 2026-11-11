@@ -186,13 +186,30 @@ def _render_advanced(spec: PlotSpec, df, stim, theme, figsize=None):
     from chipify.plot_manager import PlotManager
 
     opts = spec.options
+    x_col, y_col = str(opts.get("x", "")), str(opts.get("y", ""))
+    group_col = str(opts.get("group") or "")
+    if spec.type == "scatter":
+        # The scatter draws nothing for a column the run lacks, which wrote
+        # an empty image without a warning.
+        for key, col in (("x", x_col), ("y", y_col)):
+            if col not in df.columns:
+                raise ValueError(f"{key}: column {col!r} is not in this run's results")
     fig, canvas = _new_figure(figsize)
-    PlotManager.draw_adv_plot(
+    _artist, rows = PlotManager.draw_adv_plot(
         fig, None, canvas, df, stim, spec.plot_type.adv_mode,
-        str(opts.get("x", "")), str(opts.get("y", "")),
-        str(opts.get("target", "")), theme=theme,
+        x_col, y_col, str(opts.get("target", "")), theme=theme,
+        group_col=group_col,
     )
-    return fig, None
+    if spec.type != "scatter":    # the one advanced type with a pgfplots generator
+        return fig, None
+
+    def _latex(dest: Path, stem: str):
+        from chipify import export_latex
+        # The rows the figure drew, so the file holds exactly its points.
+        return export_latex.generate_scatter_latex_export(
+            str(dest), stem, rows, x_col, y_col, group_col)
+
+    return fig, _latex
 
 
 def _eq_service():

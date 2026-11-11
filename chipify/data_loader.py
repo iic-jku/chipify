@@ -241,6 +241,42 @@ def effective_pass(df: pd.DataFrame) -> pd.Series:
     return passed.astype(float).where(ran, other=float("nan"))
 
 
+def scatter_pass_mask(df: pd.DataFrame) -> pd.Series:
+    """Per-row verdict a scatter plot draws, as booleans.
+
+    :func:`effective_pass`, with a row where no testbench ran counted as
+    failing. The on-screen scatter and its pgfplots export both read it, so a
+    point cannot be green in one and red in the other.
+    """
+    return effective_pass(df).fillna(0.0) > 0.5
+
+
+def sort_group_values(values: Any) -> list[Any]:
+    """Group values in a sensible order: numeric when they parse, else text.
+
+    Without this a temperature sweep legends as ``-40, 100, 27`` (string sort),
+    which reads as a bug to anyone looking at the plot. Shared by every plot
+    that colours by a group, and by the LaTeX export that has to give each
+    group the same colour as the figure.
+    """
+    vals = list(values)
+    try:
+        return sorted(vals, key=lambda v: float(v))
+    except (TypeError, ValueError):
+        return sorted(vals, key=str)
+
+
+def group_column(df: pd.DataFrame, group_col: str | None) -> str:
+    """*group_col* when a plot of *df* can colour by it, else ``""``.
+
+    ``"None"`` is the GUI's "no grouping" entry, and a column the run does not
+    have (a datasheet edited since) draws ungrouped rather than failing.
+    """
+    if not group_col or group_col == "None" or group_col not in df.columns:
+        return ""
+    return group_col
+
+
 def normalise_sim_error(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure ``sim_error`` column exists, is string-typed, and has no NaNs."""
     if "sim_error" not in df.columns:
@@ -384,6 +420,27 @@ def compute_plot_cols(df: pd.DataFrame, stim: Any) -> PlotColumns:
 
     return PlotColumns(sweep_params=sweep, all_numeric_cols=all_numeric,
                        output_cols=outputs)
+
+
+def measurement_columns(df: pd.DataFrame, stim: Any) -> list[str]:
+    """The datasheet's measurements (spec'd values and ``measure:`` results)
+    present in *df*, in datasheet order."""
+    return [name for name in measurement_owners(stim) if name in df.columns]
+
+
+def scatter_axis_columns(df: pd.DataFrame, stim: Any,
+                         derived_cols: Sequence[str] = ()) -> list[str]:
+    """Columns a scatter axis offers: swept inputs, measurements, then the
+    scalar-equation results (*derived_cols*).
+
+    The one list behind the Analytics tab and the dashboard cell. The tab
+    built its own and left out the equation results, so a derived figure of
+    merit could be plotted in the dashboard but not in the main window.
+    """
+    sweep = compute_plot_cols(df, stim).sweep_params
+    return list(dict.fromkeys(
+        sweep + measurement_columns(df, stim)
+        + [c for c in derived_cols if c in df.columns]))
 
 
 # ── History helpers ───────────────────────────────────────────────────────────

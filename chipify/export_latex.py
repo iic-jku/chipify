@@ -542,6 +542,190 @@ def generate_bode_latex_export(
     return csv_path, tex_path
 
 
+# ── Scatter (shmoo) plot ──────────────────────────────────────────────────────
+
+#: The scatter's pass / fail colours, as ``plot_manager`` draws them
+#: (``_PASS_COLOR`` / ``_FAIL_COLOR``); a test keeps the two in step.
+SCATTER_PASS_HEX = "#2ecc71"
+SCATTER_FAIL_HEX = "#e74c3c"
+
+_TEX_SPECIALS = {
+    "\\": r"\textbackslash{}", "{": r"\{", "}": r"\}", "$": r"\$",
+    "&": r"\&", "#": r"\#", "^": r"\^{}", "_": r"\_", "%": r"\%",
+    "~": r"\textasciitilde{}",
+}
+
+
+def _tex_escape(text) -> str:
+    """*text* as literal LaTeX: measurement names carry ``_`` and SPICE syntax."""
+    return "".join(_TEX_SPECIALS.get(ch, ch) for ch in str(text))
+
+
+def _hex_rgb(hex_color: str) -> str:
+    h = hex_color.lstrip("#")
+    return ",".join(f"{int(h[i:i + 2], 16) / 255:.4f}" for i in (0, 2, 4))
+
+
+def _axis_coords(series: pd.Series) -> tuple[np.ndarray, list[str]]:
+    """Numeric coordinates for one scatter axis, plus tick labels for text.
+
+    matplotlib draws a column of strings (a corner sweep: ``tt``, ``ss``) as
+    categories at 0, 1, … in order of first appearance. A pgfplots axis needs
+    numbers, so the export puts the categories at the same positions and
+    names the ticks.
+    """
+    values = series.dropna()
+    if len(values) and all(isinstance(v, str) for v in values):
+        labels = list(dict.fromkeys(values))
+        pos = {lab: float(i) for i, lab in enumerate(labels)}
+        return np.array([pos.get(v, np.nan) for v in series], dtype=float), labels
+    return pd.to_numeric(series, errors="coerce").to_numpy(dtype=float), []
+
+
+def _tick_options(axis: str, labels: list[str]) -> str:
+    if not labels:
+        return ""
+    ticks = ",".join(str(i) for i in range(len(labels)))
+    names = ",".join("{" + _tex_escape(lab) + "}" for lab in labels)
+    return f"    {axis}tick={{{ticks}}}, {axis}ticklabels={{{names}}},\n"
+
+
+def generate_scatter_latex_export(
+    out_dir: str,
+    name: str,
+    rows: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    group_col: str = "",
+) -> tuple[Path, Path]:
+    """Export a scatter (shmoo) plot as CSV + pgfplots .tex.
+
+    *rows* are the rows the scatter drew, the frame ``draw_adv_plot`` returns
+    with its artist, so the file holds exactly the plotted points. Verdicts
+    (``data_loader.scatter_pass_mask``), the group order
+    (``data_loader.sort_group_values``) and the colours are the figure's:
+    ungrouped, passing points are green and failing ones red; grouped by
+    *group_col*, colour is the group value and a failing point is a cross.
+
+    Returns ``(csv_path, tex_path)``. Raises ``ValueError`` when there is no
+    point to plot.
+    """
+    from chipify import data_loader as _dl
+
+    if (rows is None or len(rows) == 0
+            or x_col not in rows.columns or y_col not in rows.columns):
+        raise ValueError("No scatter data available for the current selection.")
+
+    x, x_labels = _axis_coords(rows[x_col])
+    y, y_labels = _axis_coords(rows[y_col])
+    drawn = ~(np.isnan(x) | np.isnan(y))
+    passed = _dl.scatter_pass_mask(rows).to_numpy(dtype=bool)
+    group = _dl.group_column(rows, group_col)
+
+    color_defs: list[tuple[str, str]] = []
+    # (column key, points, colour name, drawn as a cross)
+    series: list[tuple[str, np.ndarray, str, bool]] = []
+    # (colour name, cross, label)
+    legend: list[tuple[str, bool, str]] = []
+    if group:
+        col = rows[group]
+        values = _dl.sort_group_values(col.dropna().unique())
+        for i, value in enumerate(values):
+            cname = f"cfGrp{i}"
+            r, g, b = _TAB10[i % len(_TAB10)]
+            color_defs.append((cname, f"{r:.4f},{g:.4f},{b:.4f}"))
+            members = (col == value).to_numpy(dtype=bool)
+            series.append((f"g{i}_pass", members & passed, cname, False))
+            series.append((f"g{i}_fail", members & ~passed, cname, True))
+            legend.append((cname, False, f"{group}={value}"))
+        # The figure draws a point without a group value grey; dropping it
+        # here would lose a point without a word.
+        unassigned = col.isna().to_numpy(dtype=bool)
+        series.append(("nogroup_pass", unassigned & passed, "gray", False))
+        series.append(("nogroup_fail", unassigned & ~passed, "gray", True))
+        if not passed.all():
+            legend.append(("gray", True, "Fail"))
+    else:
+        color_defs += [("cfPass", _hex_rgb(SCATTER_PASS_HEX)),
+                       ("cfFail", _hex_rgb(SCATTER_FAIL_HEX))]
+        series += [("pass", passed, "cfPass", False),
+                   ("fail", ~passed, "cfFail", False)]
+        legend += [("cfPass", False, "Pass"), ("cfFail", False, "Fail")]
+
+    columns: dict[str, np.ndarray] = {}
+    plotted: list[tuple[str, str, bool]] = []
+    for key, mask, cname, cross in series:
+        keep = mask & drawn
+        if not keep.any():
+            continue
+        columns[f"x_{key}"] = x[keep]
+        columns[f"y_{key}"] = y[keep]
+        plotted.append((key, cname, cross))
+    if not plotted:
+        raise ValueError("No scatter data available for the current selection.")
+
+    # NaN-pad to the longest series so every series fits in one CSV; pgfplots
+    # discards the "nan" cells.
+    max_len = max(len(v) for v in columns.values())
+    table = pd.DataFrame({
+        k: np.concatenate([v, np.full(max_len - len(v), np.nan)])
+        for k, v in columns.items()
+    })
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    csv_filename = f"{name}_plot.csv"
+    csv_path = Path(out_dir) / csv_filename
+    table.to_csv(csv_path, index=False, na_rep="nan")
+
+    def _mark(cname: str, cross: bool) -> str:
+        if cross:
+            return (f"mark=x, mark size=2.6pt, color={cname}, "
+                    "mark options={line width=1.1pt}")
+        return (f"mark=*, mark size=2pt, color={cname}, mark options="
+                "{fill opacity=0.7, draw=black!70, line width=0.3pt}")
+
+    # Explicit legend images and `forget plot` data: the legend lists each
+    # group once, also a group whose points all failed, and never the
+    # per-verdict series it is drawn as.
+    lines = [f"    \\addlegendimage{{only marks, {_mark(cname, cross)}}}\n"
+             f"    \\addlegendentry{{{_tex_escape(label)}}}"
+             for cname, cross, label in legend]
+    lines += [f"    \\addplot [only marks, forget plot, {_mark(cname, cross)}]"
+              f" table [x=x_{key}, y=y_{key}] {{\\datatable}};"
+              for key, cname, cross in plotted]
+
+    title = f"Shmoo Plot: {_tex_escape(y_col)} vs {_tex_escape(x_col)}"
+    if group:
+        title += f", grouped by {_tex_escape(group)}"
+    tex_content = (
+        f"% Scatter plot: {y_col} vs {x_col}"
+        + (f", grouped by {group}" if group else "") + "\n"
+        f"\\pgfplotstableread[col sep=comma]{{{csv_filename}}}\\datatable\n\n"
+        f"{_emit_color_defs(color_defs)}"
+        "\\begin{center}\n"
+        "\\begin{tikzpicture}\n"
+        "\\begin{axis}[\n"
+        f"    title={{{title}}},\n"
+        f"    xlabel={{{_tex_escape(x_col)}}},\n"
+        f"    ylabel={{{_tex_escape(y_col)}}},\n"
+        f"{_tick_options('x', x_labels)}"
+        f"{_tick_options('y', y_labels)}"
+        "    scale only axis, width=10cm, height=6cm,\n"
+        "    grid=major, grid style={dashed, gray!30},\n"
+        "    legend cell align={left},\n"
+        "    legend style={\n"
+        "        align=left, fill=white, draw=black!30, rounded corners=1pt,\n"
+        "        at={(0.97,0.97)}, anchor=north east, font=\\small\n"
+        "    },\n"
+        "    axis line style={thick}, tick style={thick, black}\n"
+        "]\n"
+        + "\n".join(lines) + "\n"
+        "\\end{axis}\n"
+        "\\end{tikzpicture}\n"
+        "\\end{center}\n"
+    )
+    tex_path = Path(out_dir) / f"{name}_plot.tex"
+    tex_path.write_text(tex_content, encoding="utf-8")
+    return csv_path, tex_path
 
 
 def generate_latex_export(param_name, data_series, dist_type, bins, output_dir):
