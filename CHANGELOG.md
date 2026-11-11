@@ -50,6 +50,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the page had an empty axes below the table whenever runs failed. The call
   drawing it raised an error that was silently ignored; a failure there is
   now logged.
+- Grouped plots with more than ten groups (or overlays with more than ten
+  signals) reused colours: twelve temperatures got nine colours, and the
+  first two groups the same one. Up to ten groups keep their colours; beyond
+  that every group gets its own, along a gradient in the groups' order. The
+  TeX exports use the same colours. The grouped histogram also listed its
+  groups in data order (`27, -40, 100`); it now sorts them like the other
+  plots.
 - Choosing another datasheet in the GUI, or creating one with **New…**, threw
   away unsaved edits in the Datasheet Editor without a word: loading rereads
   the file. It now asks to save, discard or cancel; Cancel keeps the edits and

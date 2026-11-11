@@ -5,6 +5,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from chipify.palette import category_color
+from chipify.palette import viridis as _viridis
+
 
 _RE_NON_ID = re.compile(r"[^A-Za-z0-9]+")
 
@@ -143,51 +146,8 @@ def _build_xy_table(
 
 
 # ── chipify-styled colour / alpha plumbing ────────────────────────────────────
-# Hard-coded palettes so export doesn't depend on matplotlib at import time.
-# Values pulled from matplotlib 3.x: matplotlib.cm.viridis sampled at 11 stops
-# and matplotlib.cm.tab10 at its 10 base colours.
-
-_VIRIDIS_STOPS: list[tuple[float, float, float]] = [
-    (0.267004, 0.004874, 0.329415),  # 0.0
-    (0.282327, 0.094955, 0.417331),  # 0.1
-    (0.253935, 0.265254, 0.529983),  # 0.2
-    (0.206756, 0.371758, 0.553117),  # 0.3
-    (0.163625, 0.471133, 0.558148),  # 0.4
-    (0.127568, 0.566949, 0.550556),  # 0.5
-    (0.134692, 0.658636, 0.517649),  # 0.6
-    (0.266941, 0.748751, 0.440573),  # 0.7
-    (0.477504, 0.821444, 0.318195),  # 0.8
-    (0.741388, 0.873449, 0.149561),  # 0.9
-    (0.993248, 0.906157, 0.143936),  # 1.0
-]
-
-_TAB10: list[tuple[float, float, float]] = [
-    (0.121569, 0.466667, 0.705882),
-    (1.000000, 0.498039, 0.054902),
-    (0.172549, 0.627451, 0.172549),
-    (0.839216, 0.152941, 0.156863),
-    (0.580392, 0.403922, 0.741176),
-    (0.549020, 0.337255, 0.294118),
-    (0.890196, 0.466667, 0.760784),
-    (0.498039, 0.498039, 0.498039),
-    (0.737255, 0.741176, 0.133333),
-    (0.090196, 0.745098, 0.811765),
-]
-
-
-def _viridis(t: float) -> tuple[float, float, float]:
-    """Linearly interpolated viridis sample, t in [0, 1]."""
-    t = max(0.0, min(1.0, float(t)))
-    pos = t * (len(_VIRIDIS_STOPS) - 1)
-    i = int(pos)
-    if i >= len(_VIRIDIS_STOPS) - 1:
-        return _VIRIDIS_STOPS[-1]
-    frac = pos - i
-    r0, g0, b0 = _VIRIDIS_STOPS[i]
-    r1, g1, b1 = _VIRIDIS_STOPS[i + 1]
-    return (r0 + frac * (r1 - r0),
-            g0 + frac * (g1 - g0),
-            b0 + frac * (b1 - b0))
+# The palettes live in chipify.palette (headless), shared with plot_manager so
+# a group or signal gets the same colour in the figure and in the .tex.
 
 
 def _chipify_curve_styles(
@@ -200,7 +160,8 @@ def _chipify_curve_styles(
       • Single-signal mode (one unique base signal): colour by run index using
         viridis between 0.1 and 0.9. Legend gets a single "<sig> (color = run
         index)" entry.
-      • Multi-signal mode: colour by signal using tab10; every run of a signal
+      • Multi-signal mode: colour by signal (``palette.category_color``,
+        tab10 up to ten signals); every run of a signal
         shares the colour. Legend gets one entry per signal.
       • Alpha auto-fade: 1.0 if ≤50 curves, else max(0.05, 50/N).
 
@@ -255,7 +216,7 @@ def _chipify_curve_styles(
         sig_color_name: dict[str, str] = {}
         legend_lines = []
         for i, sig in enumerate(base_signals):
-            r, g, b = _TAB10[i % len(_TAB10)]
+            r, g, b = category_color(i, len(base_signals))
             name = f"cfSig{i}"
             color_defs.append((name, _rgb_str(r, g, b)))
             sig_color_name[sig] = name
@@ -632,7 +593,7 @@ def generate_scatter_latex_export(
         values = _dl.sort_group_values(col.dropna().unique())
         for i, value in enumerate(values):
             cname = f"cfGrp{i}"
-            r, g, b = _TAB10[i % len(_TAB10)]
+            r, g, b = category_color(i, len(values))
             color_defs.append((cname, f"{r:.4f},{g:.4f},{b:.4f}"))
             members = (col == value).to_numpy(dtype=bool)
             series.append((f"g{i}_pass", members & passed, cname, False))

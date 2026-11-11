@@ -10,6 +10,7 @@ from matplotlib.lines import Line2D
 from matplotlib.markers import MarkerStyle
 from chipify import data_loader as _dl
 from chipify import settings
+from chipify.palette import category_color
 
 log = logging.getLogger("chipify.plot_manager")
 
@@ -134,15 +135,16 @@ class _OverlayStyle:
         self.pass_map = {} if self.grouped else dict(pass_map or {})
         self.single_signal = len(self.signals) == 1
 
-        base = plt.cm.tab10(np.linspace(0, 1, max(10, len(self.signals))))
-        self.sig_color = {sig: base[i % 10] for i, sig in enumerate(self.signals)}
+        n_sig = len(self.signals)
+        self.sig_color = {sig: category_color(i, n_sig)
+                          for i, sig in enumerate(self.signals)}
 
         if self.grouped:
             self.group_values = _dl.sort_group_values(
                 {self.group_map[r] for r in run_ids if r in self.group_map}
             )
-            palette = plt.cm.tab10(np.linspace(0, 1, max(10, len(self.group_values))))
-            self.group_color = {v: palette[i % 10]
+            n_grp = len(self.group_values)
+            self.group_color = {v: category_color(i, n_grp)
                                 for i, v in enumerate(self.group_values)}
             self.sig_style = {sig: _GROUP_LINESTYLES[i % len(_GROUP_LINESTYLES)]
                               for i, sig in enumerate(self.signals)}
@@ -229,20 +231,20 @@ class PlotManager:
         data_min, data_max = float('inf'), float('-inf')
         
         if group_col != "None" and group_col in valid_df.columns:
-            unique_vals = valid_df[group_col].unique()
+            # Sorted like every other grouped plot: data order legended a
+            # temperature sweep as 27, -40, 100.
+            unique_vals = _dl.sort_group_values(valid_df[group_col].dropna().unique())
             groups = [(f"{group_col}={val}", valid_df[valid_df[group_col] == val][param].dropna()) for val in unique_vals]
         else:
             groups = [("Current Run", valid_df[param].dropna())]
-            
-        colors = plt.cm.tab10(np.linspace(0, 1, max(10, len(groups))))
-        
+
         for i, (grp_name, grp_data) in enumerate(groups):
             if grp_data.empty: continue
-            
+
             if min(grp_data) < data_min: data_min = min(grp_data)
             if max(grp_data) > data_max: data_max = max(grp_data)
-            
-            c = '#3484F0' if group_col == "None" else colors[i % 10]
+
+            c = '#3484F0' if group_col == "None" else category_color(i, len(groups))
             label_text, fit_x, fit_y = grp_name, None, None
             
             if len(grp_data) > 1 and dist_type != "None":
@@ -430,7 +432,8 @@ class PlotManager:
                 # overlays, which drop pass/fail when grouped, a shmoo plot
                 # without its verdict would lose what it is for.
                 group_values = _dl.sort_group_values(valid_df[group].dropna().unique())
-                group_color = {v: plt.cm.tab10(i % 10) for i, v in enumerate(group_values)}
+                group_color = {v: category_color(i, len(group_values))
+                               for i, v in enumerate(group_values)}
                 colors = [group_color.get(v, "gray") for v in valid_df[group]]
             else:
                 colors = np.where(pass_mask, _PASS_COLOR, _FAIL_COLOR)

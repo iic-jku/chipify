@@ -80,7 +80,7 @@ def test_grouped_scatter_colours_by_value_and_marks_failures_with_crosses():
     # Sorted numerically (-40, 27, 100), tab10 in that order.
     order = {-40: 0, 27: 1, 100: 2}
     for i, temp in enumerate(rows["temp"]):
-        assert faces[i][:3] == pytest.approx(plt.cm.tab10(order[temp])[:3])
+        assert faces[i][:3] == pytest.approx(plt.cm.tab10(order[temp])[:3], abs=1e-6)
     # One path per point, the failing one a different (cross) marker.
     paths = sc.get_paths()
     assert len(paths) == len(rows)
@@ -124,7 +124,8 @@ def _export(tmp_path, rows, x="gain", y="pm", group=""):
 def test_scatter_tex_colours_match_the_figure():
     assert export_latex.SCATTER_PASS_HEX == plot_manager._PASS_COLOR
     assert export_latex.SCATTER_FAIL_HEX == plot_manager._FAIL_COLOR
-    for i, rgb in enumerate(export_latex._TAB10):
+    from chipify import palette
+    for i, rgb in enumerate(palette.TAB10):
         assert rgb == pytest.approx(plt.cm.tab10(i)[:3], abs=1e-6)
 
 
