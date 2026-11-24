@@ -149,7 +149,9 @@ def _render_waveform(spec: PlotSpec, df, stim, out_root, theme, figsize=None):
             "dc": export_latex.generate_dc_sweep_latex_export,
             "ac": export_latex.generate_bode_latex_export,
         }[kind]
-        return gen(str(dest), stem, adir, run_ids, signals, equations)
+        return gen(str(dest), stem, adir, run_ids, signals, equations,
+                   group_map=_tl.run_group_map(df, group_col),
+                   group_label=group_col)
 
     return fig, _latex
 
@@ -173,11 +175,13 @@ def _render_histogram(spec: PlotSpec, df, stim, theme, figsize=None):
 
     def _latex(dest: Path, stem: str):
         from chipify import export_latex
-        data = _dl.plot_rows(df, stim, [param])[param]
+        rows = _dl.plot_rows(df, stim, [param])
+        group = _dl.group_column(rows, str(hist["group"]))
         bins_text = str(hist["bins"])
         bins = "auto" if bins_text == "Auto" else int(bins_text)
         return export_latex.generate_latex_export(
-            stem, data, str(hist["fit"]), bins, str(dest))
+            stem, rows[param], str(hist["fit"]), bins, str(dest),
+            group_series=rows[group] if group else None)
 
     return fig, _latex
 

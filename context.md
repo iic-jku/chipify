@@ -24,6 +24,8 @@
 | `plot_manager.py` | All Matplotlib logic. Avoids GUI bloat. |
 | `data_loader.py` | Results loading / pass-fail / plot-column classification / history — shared by the engine, exporters, and GUI; headless, no GUI deps. |
 | `spectrum.py` | `amplitude_spectrum()` — the one FFT, behind the Plots tab's Spectrum view, the dashboard cell and `type: spectrum` report plots. Headless. |
+| `overlay_style.py` | `OverlayStyle` — the waveform overlays' colour / line-style / legend policy, shared by the figures and their TeX export. Headless. |
+| `bode.py` | `continuous_phase()` — the unwrapped Bode phase, drawn by the figure and the TeX export. Headless. |
 | `reports.py` | Vocabulary for the datasheet's `reports:` block: `PlotSpec` / `ReportsConfig` and the `PLOT_TYPES` registry. |
 | `report_service.py` | Renders that block headlessly to `out/reports/<timestamp>/` — the single path behind `--reports`, the GUI button and the one-click PDF (`config=pdf_only_config()`). |
 | `cli.py` | Entry point for headless execution or launching the GUI (`run_gui()` → Qt app). |
@@ -220,10 +222,13 @@ A declared analysis (`transient/dc/ac_signals`) that produced no waveform CSV is
 *   The plot uses a **log frequency axis** and `remove_dc=True`, and leaves out bin 0. A transient is sampled far above the signal, so on a linear axis to Nyquist the fundamental and its harmonics shared the leftmost few percent of the plot; and with the mean left in, the window smeared a bias point over the lowest bins drawn (+2 dB at bin 1 for a 0.9 V output), where it can hide a fundamental only a few bins up.
 *   No TeX export: `supports_latex` is False, and the Plots tab disables its TeX button in the Spectrum view, because the overlay TeX exporter writes the captured time-domain CSVs and would label them as a spectrum. The dashboard cell has no window selector and uses Hann.
 
-### Waveform overlay grouping (`plot_manager._OverlayStyle`)
-*   The Transient / DC sweep / Spectrum / Bode overlays share one colour-and-legend policy. Ungrouped, colour encodes the signal (or the run index for a single signal) and failing runs are red — unchanged.
-*   Passing `group_map` (`run_id -> value`, from `transient_loader.run_group_map`) plus `group_label` switches colour to the **group value**, line style to the signal, and turns pass/fail highlighting **off** — red would pull failing curves out of the grouping. Legend labels use `temp=27`, matching `draw_histogram`'s convention.
+### Waveform overlay grouping (`overlay_style.OverlayStyle`)
+*   The Transient / DC sweep / Spectrum / Bode overlays **and their TeX exports** share one colour / line-style / legend policy, `overlay_style.OverlayStyle` (headless). `plot_manager._OverlayStyle` only adds matplotlib's viridis and `Line2D` handles; `export_latex._chipify_curve_styles` turns its colour keys into `\definecolor` names (`cfGrp<i>`, `cfSig<j>`, `cfRun<k>`). The TeX exporter once kept its own copy of these rules, which never learned grouping, so a grouped figure exported ungrouped. Do not add colour rules to either renderer.
+*   Ungrouped, colour encodes the signal (or the run index for a single signal) and failing runs are red. The TeX export is not given the pass map, so its failing runs are not red (open gap).
+*   Passing `group_map` (`run_id -> value`, from `transient_loader.run_group_map`) plus `group_label` switches colour to the **group value**, line style to the signal, and turns pass/fail highlighting **off** — red would pull failing curves out of the grouping. Legend labels use `temp=27`, matching `draw_histogram`'s convention. Every caller that draws with a group passes the same map to the TeX export (Plots tab, dashboard cell, `report_service._render_waveform`).
 *   The Plots tab and the dashboard's `Plots` cell both drive this through the same helpers; the cell's legacy `"Transient"` mode name is migrated in `apply_config`.
+*   The **Bode phase** is drawn through `bode.continuous_phase` in the figure and the TeX export: the capture stores the principal value (ngspice `ph()`, `numpy.angle` on the VACASK path), which jumped by 360° at ±180°. Unwrapping happens at plot time, not at capture, so existing runs plot continuously and the CSVs stay as captured.
+*   The **grouped histogram** splits its rows with `data_loader.histogram_groups` in the figure and in `export_latex.generate_latex_export(group_series=…)`, so groups, order and colours agree. Its TeX draws one `ybar interval` and fit per group with explicit `area legend` swatches (the default `ybar interval` legend image does not show the fill colour). Without a group the TeX output is byte-identical to before.
 
 ### Group and signal colours (`palette.py`)
 *   `palette.category_color(i, n)` is the colour of category *i* of *n* for every grouped plot (histogram, scatter, the waveform overlays' groups and signals) and for their TeX exports: tab10 in order up to ten, evenly spaced viridis (0.1 to 0.9) beyond. The palettes are hard-coded there so `export_latex` gets the figure's colours without importing matplotlib.

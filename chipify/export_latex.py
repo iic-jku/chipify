@@ -1,10 +1,13 @@
 ﻿# Copyright (c) 2026 Santiago Hofwimmer
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from chipify.bode import continuous_phase
+from chipify.overlay_style import OverlayStyle
 from chipify.palette import category_color
 from chipify.palette import viridis as _viridis
 
@@ -146,89 +149,100 @@ def _build_xy_table(
 
 
 # ── chipify-styled colour / alpha plumbing ────────────────────────────────────
-# The palettes live in chipify.palette (headless), shared with plot_manager so
-# a group or signal gets the same colour in the figure and in the .tex.
+# Colours, line styles and the legend come from overlay_style.OverlayStyle, the
+# policy the figures draw with, so a group or signal gets the same colour in the
+# figure and in the .tex, and a grouped figure exports grouped.
+
+#: matplotlib line style -> pgfplots dash pattern (solid is pgfplots' default).
+_TEX_DASH = {"--": "dashed", "-.": "dashdotted", ":": "dotted"}
+
+#: Colour key role (``OverlayStyle.color_key``) -> ``\definecolor`` name prefix.
+_TEX_COLOR_PREFIX = {"group": "cfGrp", "signal": "cfSig", "run": "cfRun"}
+
+
+def _rgb_tex(color) -> str:
+    """An RGB(A) tuple or a hex string as ``"r,g,b"`` for ``\\definecolor``."""
+    if isinstance(color, str):
+        return _hex_rgb(color)
+    r, g, b = (float(c) for c in tuple(color)[:3])
+    return f"{r:.4f},{g:.4f},{b:.4f}"
+
+
+@dataclass
+class _CurveStyles:
+    """What the overlay writers need from the shared ``OverlayStyle``."""
+
+    #: ``[(name, "r,g,b"), …]`` to emit as ``\definecolor`` blocks.
+    color_defs: list[tuple[str, str]]
+    #: ``{(rid, base_sig): "color=<name>[, dashed]"}`` for each curve.
+    curve_opts: dict[tuple[str, str], str]
+    #: Curve opacity: 1.0 up to 50 curves, else max(0.05, 50/N).
+    alpha: float
+    #: The ``\addlegendimage`` / ``\addlegendentry`` lines, in legend order.
+    legend_lines: list[str]
+    #: The column the curves are grouped by, ``""`` when ungrouped.
+    group: str
 
 
 def _chipify_curve_styles(
     series_keys: list[tuple[str, str, str, str]],
-) -> tuple[list[tuple[str, str]], dict[tuple[str, str], str], float, bool,
-           list[str]]:
-    """Compute per-curve colours that mirror ``PlotManager._draw_xy_overlay``.
+    signals: list[str],
+    run_ids: list[str],
+    group_map: dict | None = None,
+    group_label: str = "",
+) -> _CurveStyles:
+    """Per-curve pgfplots options and legend, as the figure draws them.
 
-    Rules (lifted from plot_manager.py):
-      • Single-signal mode (one unique base signal): colour by run index using
-        viridis between 0.1 and 0.9. Legend gets a single "<sig> (color = run
-        index)" entry.
-      • Multi-signal mode: colour by signal (``palette.category_color``,
-        tab10 up to ten signals); every run of a signal
-        shares the colour. Legend gets one entry per signal.
-      • Alpha auto-fade: 1.0 if ≤50 curves, else max(0.05, 50/N).
-
-    Returns ``(color_defs, curve_color, alpha, single_mode, legend_lines)``:
-      color_defs   – ``[(name, "r,g,b"), …]`` to emit as \\definecolor blocks.
-      curve_color  – ``{(rid, base_sig): color_name}`` for each curve.
-      alpha        – curve opacity to use.
-      single_mode  – True if the legend should show "color = run index".
-      legend_lines – the lines to splice in front of the data plots.
+    *signals* and *run_ids* are what the figure gets: the selected signals and
+    the runs whose files were found. *group_map* (``run_id -> value``) and
+    *group_label* group the curves exactly as ``PlotManager`` does: colour by
+    group value, line style by signal, a legend entry per group value.
     """
-    base_signals: list[str] = []
-    seen_sigs: set[str] = set()
-    runs_in_order: list[str] = []
-    seen_runs: set[str] = set()
-    for rid, base_sig, _suffix, _col in series_keys:
-        if base_sig not in seen_sigs:
-            seen_sigs.add(base_sig)
-            base_signals.append(base_sig)
-        if rid not in seen_runs:
-            seen_runs.add(rid)
-            runs_in_order.append(rid)
-
-    n_runs = max(1, len(runs_in_order))
-    # A "curve" is one (rid, base_sig) pair — mag+phase share it for Bode.
-    n_curves = len({(rid, sig) for rid, sig, _s, _c in series_keys})
-    alpha = 1.0 if n_curves <= 50 else max(0.05, 50.0 / n_curves)
-    single_mode = len(base_signals) == 1
-
+    style = OverlayStyle(signals, run_ids, group_map=group_map,
+                         group_label=group_label, shade=_viridis)
+    names: dict = {}
     color_defs: list[tuple[str, str]] = []
-    curve_color: dict[tuple[str, str], str] = {}
 
-    def _rgb_str(r: float, g: float, b: float) -> str:
-        return f"{r:.4f},{g:.4f},{b:.4f}"
+    def _opts(key, linestyle: str) -> str:
+        if key not in names:
+            role, i = key
+            if role == "neutral":
+                names[key] = "gray"
+            else:
+                names[key] = ("cfFail" if role == "fail"
+                              else f"{_TEX_COLOR_PREFIX[role]}{i}")
+                color_defs.append((names[key], _rgb_tex(style.resolve(key))))
+        dash = _TEX_DASH.get(linestyle)
+        return f"color={names[key]}" + (f", {dash}" if dash else "")
 
-    if single_mode:
-        ts = np.linspace(0.1, 0.9, n_runs)
-        run_color_name: dict[str, str] = {}
-        for i, rid in enumerate(runs_in_order):
-            r, g, b = _viridis(float(ts[i]))
-            name = f"cfRun{i}"
-            color_defs.append((name, _rgb_str(r, g, b)))
-            run_color_name[rid] = name
-        for rid, sig, _suffix, _col in series_keys:
-            curve_color[(rid, sig)] = run_color_name[rid]
-        mid = run_color_name[runs_in_order[n_runs // 2]]
-        sig_safe = base_signals[0].replace("_", r"\_")
-        legend_lines = [
-            f"    \\addlegendimage{{color={mid}, line width=1pt}}",
-            f"    \\addlegendentry{{{sig_safe}  (color = run index)}}",
-        ]
-    else:
-        sig_color_name: dict[str, str] = {}
-        legend_lines = []
-        for i, sig in enumerate(base_signals):
-            r, g, b = category_color(i, len(base_signals))
-            name = f"cfSig{i}"
-            color_defs.append((name, _rgb_str(r, g, b)))
-            sig_color_name[sig] = name
-            sig_safe = sig.replace("_", r"\_")
-            legend_lines.append(
-                f"    \\addlegendimage{{color={name}, line width=1pt}}"
-            )
-            legend_lines.append(f"    \\addlegendentry{{{sig_safe}}}")
-        for rid, sig, _suffix, _col in series_keys:
-            curve_color[(rid, sig)] = sig_color_name[sig]
+    legend_lines: list[str] = []
+    for key, linestyle, label in style.legend_entries():
+        legend_lines.append(
+            f"    \\addlegendimage{{{_opts(key, linestyle)}, line width=1pt}}")
+        legend_lines.append(f"    \\addlegendentry{{{_tex_escape(label)}}}")
 
-    return color_defs, curve_color, alpha, single_mode, legend_lines
+    # A "curve" is one (rid, base_sig) pair — mag+phase share it for Bode.
+    curve_opts: dict[tuple[str, str], str] = {}
+    for rid, sig, _suffix, _col in series_keys:
+        if (rid, sig) not in curve_opts:
+            curve_opts[(rid, sig)] = _opts(style.color_key(rid, sig),
+                                           style.linestyle(sig))
+    n_curves = len(curve_opts)
+    alpha = 1.0 if n_curves <= 50 else max(0.05, 50.0 / n_curves)
+    return _CurveStyles(color_defs, curve_opts, alpha, legend_lines,
+                        style.group_label if style.grouped else "")
+
+
+def _overlay_title(prefix: str, series_keys, group: str) -> str:
+    n_runs = len({rid for rid, _s, _u, _c in series_keys})
+    n_sigs = len({sig for _r, sig, _u, _c in series_keys})
+    title = f"{prefix} \\textemdash{{}} {n_runs} run(s) {n_sigs} signal(s)"
+    if n_sigs > 1:
+        title = (f"{prefix} \\textemdash{{}} {n_runs} run(s) "
+                 f"$\\times$ {n_sigs} signal(s)")
+    if group:
+        title += f", grouped by {_tex_escape(group)}"
+    return title
 
 
 def _emit_color_defs(color_defs: list[tuple[str, str]]) -> str:
@@ -246,6 +260,7 @@ def _write_overlay_tex(
     csv_filename: str,
     series_keys: list[tuple[str, str, str, str]],
     series_x: dict[str, str],
+    styles: _CurveStyles,
     *,
     xlabel: str,
     ylabel: str,
@@ -254,29 +269,21 @@ def _write_overlay_tex(
 ) -> str:
     """Emit a single-axis pgfplots overlay styled like chipify's GUI plot."""
     tex_filename = f"{name}_plot.tex"
-    color_defs, curve_color, alpha, _single, legend_lines = \
-        _chipify_curve_styles(series_keys)
-
-    n_runs = len({rid for rid, _s, _u, _c in series_keys})
-    n_sigs = len({sig for _r, sig, _u, _c in series_keys})
-    title = f"{title_prefix} \\textemdash{{}} {n_runs} run(s) {n_sigs} signal(s)"
-    if n_sigs > 1:
-        title = (f"{title_prefix} \\textemdash{{}} {n_runs} run(s) "
-                 f"$\\times$ {n_sigs} signal(s)")
+    title = _overlay_title(title_prefix, series_keys, styles.group)
 
     addplots: list[str] = []
     for rid, sig, _suffix, col in series_keys:
-        cname = curve_color.get((rid, sig), "black")
+        opts = styles.curve_opts.get((rid, sig), "color=black")
         x_col = series_x.get(col, col)
         addplots.append(
-            f"    \\addplot+ [color={cname}, no marks,"
-            f" line width=0.6pt, opacity={alpha:.3f}]"
+            f"    \\addplot+ [{opts}, no marks,"
+            f" line width=0.6pt, opacity={styles.alpha:.3f}]"
             f" table [x={x_col}, y={col}] {{\\datatable}};"
         )
 
-    plot_block = "\n".join(legend_lines + addplots)
+    plot_block = "\n".join(styles.legend_lines + addplots)
     xmode_line = f"    xmode={xmode},\n" if xmode and xmode != "normal" else ""
-    color_block = _emit_color_defs(color_defs)
+    color_block = _emit_color_defs(styles.color_defs)
 
     tex_content = (
         f"% {title_prefix}\n"
@@ -321,8 +328,13 @@ def generate_transient_latex_export(
     run_ids: list[str],
     signals: list[str],
     equations: list | None = None,
+    group_map: dict | None = None,
+    group_label: str = "",
 ) -> tuple[str, str]:
     """Export a transient overlay (time vs signal) as CSV + pgfplots .tex.
+
+    *group_map* (``run_id -> value``, ``transient_loader.run_group_map``) and
+    *group_label* group the curves as the figure does.
 
     Returns ``(csv_path, tex_path)``. Raises ``ValueError`` if no data could be
     collected (no matching runs, missing 'time' column, etc.).
@@ -354,8 +366,11 @@ def generate_transient_latex_export(
     csv_filename = f"{name}_plot.csv"
     csv_path = Path(out_dir) / csv_filename
     table.to_csv(csv_path, index=False)
+    styles = _chipify_curve_styles(series_keys, signals,
+                                   [rid for rid, _ in run_files],
+                                   group_map, group_label)
     tex_path = _write_overlay_tex(
-        out_dir, name, csv_filename, series_keys, series_x,
+        out_dir, name, csv_filename, series_keys, series_x, styles,
         xlabel=f"Time ({t_unit})", ylabel="Signal Value",
         title_prefix="Transient Overlay",
     )
@@ -369,8 +384,11 @@ def generate_dc_sweep_latex_export(
     run_ids: list[str],
     signals: list[str],
     equations: list | None = None,
+    group_map: dict | None = None,
+    group_label: str = "",
 ) -> tuple[str, str]:
-    """Export a DC sweep overlay (sweep vs signal) as CSV + pgfplots .tex."""
+    """Export a DC sweep overlay (sweep vs signal) as CSV + pgfplots .tex,
+    grouped as in :func:`generate_transient_latex_export`."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     run_files = _collect_run_files(dc_dir, run_ids)
 
@@ -389,8 +407,11 @@ def generate_dc_sweep_latex_export(
     csv_filename = f"{name}_plot.csv"
     csv_path = Path(out_dir) / csv_filename
     table.to_csv(csv_path, index=False)
+    styles = _chipify_curve_styles(series_keys, signals,
+                                   [rid for rid, _ in run_files],
+                                   group_map, group_label)
     tex_path = _write_overlay_tex(
-        out_dir, name, csv_filename, series_keys, series_x,
+        out_dir, name, csv_filename, series_keys, series_x, styles,
         xlabel="Sweep", ylabel="Signal Value",
         title_prefix="DC Sweep Overlay",
     )
@@ -404,11 +425,15 @@ def generate_bode_latex_export(
     run_ids: list[str],
     signals: list[str],
     equations: list | None = None,
+    group_map: dict | None = None,
+    group_label: str = "",
 ) -> tuple[str, str]:
     """Export a Bode overlay (frequency vs mag-in-dB and phase) as CSV + .tex.
 
     Uses pgfplots' ``groupplots`` library to stack magnitude (dB) above phase
-    (degrees) with a shared logarithmic frequency axis.
+    (degrees) with a shared logarithmic frequency axis. The phase is the
+    figure's continuous one (``bode.continuous_phase``), and the curves are
+    grouped as in :func:`generate_transient_latex_export`.
     """
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     run_files = _collect_run_files(ac_dir, run_ids)
@@ -421,7 +446,7 @@ def generate_bode_latex_export(
             mag = np.maximum(np.abs(df[mag_col].to_numpy()), 1e-30)
             out.append(("mag", pd.Series(20.0 * np.log10(mag))))
         if ph_col in df.columns:
-            out.append(("phase", df[ph_col]))
+            out.append(("phase", pd.Series(continuous_phase(df[ph_col]))))
         return out
 
     table, series_keys, series_x = _build_xy_table(
@@ -435,8 +460,9 @@ def generate_bode_latex_export(
     csv_path = Path(out_dir) / csv_filename
     table.to_csv(csv_path, index=False)
 
-    color_defs, curve_color, alpha, _single, legend_lines = \
-        _chipify_curve_styles(series_keys)
+    styles = _chipify_curve_styles(series_keys, signals,
+                                   [rid for rid, _ in run_files],
+                                   group_map, group_label)
 
     mag_keys = [k for k in series_keys if k[2] == "mag"]
     phase_keys = [k for k in series_keys if k[2] == "phase"]
@@ -444,28 +470,23 @@ def generate_bode_latex_export(
     def _plots_block(keys: list[tuple[str, str, str, str]]) -> str:
         rows: list[str] = []
         for rid, sig, _suffix, col in keys:
-            cname = curve_color.get((rid, sig), "black")
+            opts = styles.curve_opts.get((rid, sig), "color=black")
             x_col = series_x.get(col, col)
             rows.append(
-                f"        \\addplot+ [color={cname}, no marks,"
-                f" line width=0.5pt, opacity={alpha:.3f}]"
+                f"        \\addplot+ [{opts}, no marks,"
+                f" line width=0.5pt, opacity={styles.alpha:.3f}]"
                 f" table [x={x_col}, y={col}] {{\\datatable}};"
             )
         return "\n".join(rows) if rows else ""
 
     # Show the legend on the magnitude subplot only (it's the same colour
     # mapping for the phase plot below).
-    legend_block = "\n".join("    " + ln.lstrip() for ln in legend_lines)
+    legend_block = "\n".join("    " + ln.lstrip() for ln in styles.legend_lines)
 
-    n_runs = len({rid for rid, _s, _u, _c in series_keys})
-    n_sigs = len({sig for _r, sig, _u, _c in series_keys})
-    title = f"Bode Plot \\textemdash{{}} {n_runs} run(s) {n_sigs} signal(s)"
-    if n_sigs > 1:
-        title = (f"Bode Plot \\textemdash{{}} {n_runs} run(s) "
-                 f"$\\times$ {n_sigs} signal(s)")
+    title = _overlay_title("Bode Plot", series_keys, styles.group)
 
     tex_filename = f"{name}_plot.tex"
-    color_block = _emit_color_defs(color_defs)
+    color_block = _emit_color_defs(styles.color_defs)
     tex_content = (
         f"% Bode plot for {name}\n"
         "% Requires: \\usepgfplotslibrary{groupplots}\n"
@@ -689,26 +710,20 @@ def generate_scatter_latex_export(
     return csv_path, tex_path
 
 
-def generate_latex_export(param_name, data_series, dist_type, bins, output_dir):
-    """Write ``<param>_plot.csv`` + ``.tex`` for one measurement's distribution.
-
-    Returns ``(csv_path, tex_path)``, or ``None`` when the series holds no
-    numeric data (callers must not report success then).
-    """
-    import scipy.stats as stats  # only needed for the histogram fit path
-    data = data_series.dropna().values
-    if len(data) == 0:
-        return None
-
-    # 1. Compute the histogram.
+def _histogram_xy(data, bins):
+    """``(x_hist, y_hist, counts)`` for a pgfplots ``ybar interval`` plot."""
     # 'ybar interval' in PGFPlots needs the bin edges, not the centers!
     counts, edges = np.histogram(data, bins=bins, density=True)
 
     # For 'ybar interval', X and Y must be the same length; the last Y is ignored.
     x_hist = edges
     y_hist = np.append(counts, counts[-1] if len(counts)>0 else 0)
+    return x_hist, y_hist, counts
 
-    # 2. Compute the fit curve and its parameters.
+
+def _histogram_fit(data, dist_type, counts):
+    """``(fit_x, fit_y, fit_params, fit_legend_latex)`` of one distribution."""
+    import scipy.stats as stats  # only needed for the histogram fit path
     fit_x = None
     fit_y = None
     fit_params = {}
@@ -759,6 +774,50 @@ def generate_latex_export(param_name, data_series, dist_type, bins, output_dir):
         except Exception:
             fit_x, fit_y = None, None
             fit_legend_latex = ""
+    return fit_x, fit_y, fit_params, fit_legend_latex
+
+
+#: Fit parameter -> its symbol in a grouped histogram's legend entry, as the
+#: ungrouped entry writes it.
+_FIT_SYMBOLS = {"mu": r"\mu", "sigma": r"\sigma", "loc": "loc",
+                "scale": "scale", "shape": "s", "df": "df"}
+
+
+def _letters(i: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA: a TeX macro name cannot hold digits."""
+    out = ""
+    i += 1
+    while i:
+        i, rem = divmod(i - 1, 26)
+        out = chr(ord("A") + rem) + out
+    return out
+
+
+def generate_latex_export(param_name, data_series, dist_type, bins, output_dir,
+                          group_series=None):
+    """Write ``<param>_plot.csv`` + ``.tex`` for one measurement's distribution.
+
+    *group_series* is the swept input the histogram is grouped by: a Series
+    named after its column and aligned with *data_series* by index. It draws
+    one histogram and fit per group value, in the figure's order and colours
+    (``data_loader.histogram_groups``, ``palette.category_color``).
+
+    Returns ``(csv_path, tex_path)``, or ``None`` when the series holds no
+    numeric data (callers must not report success then).
+    """
+    data = data_series.dropna().values
+    if len(data) == 0:
+        return None
+    if group_series is not None and group_series.name:
+        return _generate_grouped_histogram(param_name, data_series, group_series,
+                                           dist_type, bins, output_dir)
+
+    # 1. Compute the histogram.
+    x_hist, y_hist, counts = _histogram_xy(data, bins)
+
+    # 2. Compute the fit curve and its parameters.
+    fit_x, fit_y, fit_params, fit_legend_latex = _histogram_fit(
+        data, dist_type, counts)
 
     # 3. Generate the CSV with NaN padding so all columns are the same length.
     max_len = max(len(x_hist), len(fit_x) if fit_x is not None else 0)
@@ -843,4 +902,122 @@ def generate_latex_export(param_name, data_series, dist_type, bins, output_dir):
 
     tex_path = Path(output_dir) / tex_filename
     tex_path.write_text(tex_content)
+    return csv_path, tex_path
+
+
+def _generate_grouped_histogram(param_name, data_series, group_series,
+                                dist_type, bins, output_dir):
+    """:func:`generate_latex_export` grouped: one histogram and fit per group.
+
+    As the figure draws it: the groups of ``data_loader.histogram_groups``, the
+    colour of group *i* of *n* is ``category_color(i, n)`` (also when an empty
+    group is left out), translucent bars, the fit in the group's colour, and one
+    legend entry per group carrying its fit parameters.
+    """
+    from chipify import data_loader as _dl
+
+    group = str(group_series.name)
+    value_col = f"{group}__value"         # any name but the group's
+    # Every row of the group column, also those without a value: the figure
+    # counts a group whose runs all lack the measurement, and the colours of
+    # the groups after it depend on that count.
+    rows = pd.DataFrame({group: group_series})
+    rows[value_col] = data_series        # aligned by index
+    groups = _dl.histogram_groups(rows, value_col, group)
+
+    columns: dict[str, np.ndarray] = {}
+    color_defs: list[tuple[str, str]] = []
+    read_macros: list[str] = []
+    plots: list[str] = []
+    for i, (label, grp) in enumerate(groups):
+        grp_data = grp.to_numpy(dtype=float)
+        if len(grp_data) == 0:
+            continue
+        cname = f"cfGrp{i}"
+        color_defs.append((cname, _rgb_tex(category_color(i, len(groups)))))
+        x_hist, y_hist, counts = _histogram_xy(grp_data, bins)
+        fit_x, fit_y, fit_params, _ = _histogram_fit(grp_data, dist_type, counts)
+        key = f"g{i}"
+        columns[f"x_hist_{key}"] = x_hist
+        columns[f"y_hist_{key}"] = y_hist
+
+        entry = _tex_escape(label)
+        have_fit = fit_x is not None and fit_y is not None
+        if have_fit and fit_params:
+            parts = []
+            for pname, pval in fit_params.items():
+                col = f"{pname}_{key}"
+                macro = f"\\{pname}Val{_letters(i)}"
+                columns[col] = np.array([pval], dtype=float)
+                read_macros.append(f"\\pgfplotstablegetelem{{0}}{{{col}}}"
+                                   f"\\of\\datatable \\let{macro}\\pgfplotsretval")
+                parts.append(f"${_FIT_SYMBOLS.get(pname, pname)}"
+                             f"=\\formatnum{{3}}{{{macro}}}$")
+            entry += " (" + ", ".join(parts) + ")"
+        # An explicit swatch: the legend image of a `ybar interval` plot is a
+        # thin outline that does not show the group's fill colour.
+        bars = f"fill={cname}, fill opacity=0.5, draw=black, line width=0.3pt"
+        plots.append(
+            f"    % --- group {i} ---\n"
+            f"    \\addlegendimage{{area legend, {bars}}}\n"
+            f"    \\addlegendentry{{{entry}}}\n"
+            f"    \\addplot [ybar interval, {bars}, forget plot]\n"
+            f"        table [x=x_hist_{key}, y=y_hist_{key}] {{\\datatable}};\n"
+        )
+        if have_fit:
+            columns[f"x_curve_{key}"] = fit_x
+            columns[f"y_curve_{key}"] = fit_y
+            plots.append(
+                f"    \\addplot [color={cname}, very thick, no marks, forget plot]\n"
+                f"        table [x=x_curve_{key}, y=y_curve_{key}] {{\\datatable}};\n"
+            )
+    if not columns:
+        return None
+
+    # NaN-pad to the longest column so all series fit in one CSV; pgfplots
+    # discards the "nan" cells.
+    max_len = max(len(v) for v in columns.values())
+    table = pd.DataFrame({
+        k: np.concatenate([v, np.full(max_len - len(v), np.nan)])
+        for k, v in columns.items()
+    })
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    stem = _safe_col(param_name)
+    csv_filename = f"{stem}_plot.csv"
+    csv_path = Path(output_dir) / csv_filename
+    table.to_csv(csv_path, index=False, na_rep="nan")
+
+    tex_content = (
+        f"% Plot for {param_name}, grouped by {group}\n"
+        f"\\pgfplotstableread[col sep=comma]{{{csv_filename}}}\\datatable\n\n"
+        "% Read parameters from row 0\n"
+        + "".join(m + "\n" for m in read_macros) + "\n"
+        "% Define helper macro (if not already defined globally)\n"
+        "\\providecommand{\\formatnum}[2]{\\pgfmathprintnumber"
+        "[fixed, precision=#1, zerofill]{#2}}\n\n"
+        f"{_emit_color_defs(color_defs)}"
+        "\\begin{center}\n"
+        "\\begin{tikzpicture}\n"
+        "\\begin{axis}[\n"
+        f"    title={{Simulation: {_tex_escape(param_name)},"
+        f" grouped by {_tex_escape(group)}}},\n"
+        "    xlabel={Simulated Value},\n"
+        "    ylabel={Probability density},\n"
+        "    ymin=0, enlarge x limits=0.05,\n"
+        "    grid=major, grid style={solid, gray!20},\n"
+        "    legend cell align={left},\n"
+        "    legend style={\n"
+        "        align=left, fill=white, draw=black!30, rounded corners=1pt,\n"
+        "        at={(0.95,0.95)}, anchor=north east\n"
+        "    },\n"
+        "    width=10cm, height=8cm,\n"
+        "    axis line style={thick}, tick style={thick, black}\n"
+        "]\n"
+        + "".join(plots)
+        + "\\end{axis}\n"
+        "\\end{tikzpicture}\n"
+        "\\end{center}\n"
+    )
+    tex_path = Path(output_dir) / f"{stem}_plot.tex"
+    tex_path.write_text(tex_content, encoding="utf-8")
     return csv_path, tex_path

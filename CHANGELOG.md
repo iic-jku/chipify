@@ -39,6 +39,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Bode). Before, a dashboard plot could not be exported at all.
 
 ### Fixed
+- The TeX export of a grouped transient, DC sweep or Bode plot ignored the
+  grouping: the curves were coloured by run index or signal and the legend had
+  no group entries, while the figure was coloured by the group value. The
+  `.tex` now has the figure's colours, line styles (one per signal when
+  grouped) and legend, from the Plots tab, the dashboard cell and `latex` in
+  a `reports:` plot. The grouped histogram's TeX export had the same gap; it
+  now draws one histogram and fit per group, with the fit parameters in each
+  group's legend entry. A single-signal overlay's legend line now has the
+  first run's colour, as in the figure.
+- The Bode plot's phase jumped by 360° wherever it crossed ±180°, in the
+  figure and in its TeX export, because the phase is captured wrapped. Both
+  now draw a continuous phase, unwrapped from the first frequency point; the
+  stored CSVs keep the captured values, so older runs plot continuously too.
 - The scatter plot in the Analytics tab offered no scalar-equation results on
   its X and Y axes, while the dashboard's scatter did. Both now offer the same
   list: swept inputs, measurements, then equation results. The Reports dialog

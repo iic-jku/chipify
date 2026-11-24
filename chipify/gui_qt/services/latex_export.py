@@ -38,8 +38,13 @@ def export_histogram_latex(
     data_series,
     dist_type: str,
     bins,
+    group_series=None,
 ) -> None:
-    """Write the current distribution (+ optional fit) as pgfplots CSV + .tex."""
+    """Write the current distribution (+ optional fit) as pgfplots CSV + .tex.
+
+    *group_series*, the group-by column of the drawn rows (``None`` when
+    ungrouped), exports one histogram per group, as the figure draws them.
+    """
     if not param or param == "-" or data_series is None or len(data_series) == 0:
         QMessageBox.information(
             parent, "TeX Export",
@@ -53,6 +58,7 @@ def export_histogram_latex(
     try:
         written = export_latex.generate_latex_export(
             param, data_series, dist_type, bins, out_dir,
+            group_series=group_series,
         )
     except Exception as exc:  # noqa: BLE001
         log.exception("Histogram LaTeX export failed: %s", exc)
@@ -79,8 +85,15 @@ def export_overlay_latex(
     run_ids: list[str],
     signals: list[str],
     equations: list | None = None,
+    group_map: dict | None = None,
+    group_label: str = "",
 ) -> None:
-    """Write a transient / DC / Bode overlay as pgfplots CSV + .tex."""
+    """Write a transient / DC / Bode overlay as pgfplots CSV + .tex.
+
+    *group_map* and *group_label* are what the figure was drawn with
+    (``transient_loader.run_group_map`` and the Group-by column), so a grouped
+    overlay exports grouped.
+    """
     if not analysis_dir:
         QMessageBox.information(
             parent, "TeX Export",
@@ -99,6 +112,7 @@ def export_overlay_latex(
     try:
         csv_path, tex_path = generate(
             out_dir, name, analysis_dir, run_ids, signals, equations=equations,
+            group_map=group_map, group_label=group_label,
         )
     except ValueError as exc:
         # Raised when the current selection yields no plottable data.

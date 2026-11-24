@@ -271,7 +271,10 @@ class PlotsTab(QWidget):
         signals = [i.text() for i in self.signal_list.selectedItems()]
         run_ids = self._selected_run_ids(df) if df is not None else []
         equations = self._tran_equations() if kind == "transient" else []
-        export_overlay_latex(self, kind, adir, run_ids, signals, equations)
+        group_col = self._current_group()
+        export_overlay_latex(self, kind, adir, run_ids, signals, equations,
+                             group_map=_tl.run_group_map(df, group_col),
+                             group_label=group_col)
 
     def _redraw(self, *_args) -> None:
         kind = self._current_kind()

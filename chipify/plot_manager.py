@@ -10,6 +10,8 @@ from matplotlib.lines import Line2D
 from matplotlib.markers import MarkerStyle
 from chipify import data_loader as _dl
 from chipify import settings
+from chipify.bode import continuous_phase
+from chipify.overlay_style import FAIL_HEX, OverlayStyle
 from chipify.palette import category_color
 
 log = logging.getLogger("chipify.plot_manager")
@@ -109,10 +111,7 @@ def _adv_plot_columns(mode, x_col, y_col, target, plugin_param):
     return []
 
 
-_FAIL_COLOR = "#e74c3c"
-
-#: Line styles cycled per signal when colour is already spoken for by a group.
-_GROUP_LINESTYLES = ["-", "--", "-.", ":"]
+_FAIL_COLOR = FAIL_HEX
 
 #: The scatter's passing-point colour (``export_latex.SCATTER_PASS_HEX``).
 _PASS_COLOR = "#2ecc71"
@@ -124,95 +123,24 @@ def _marker_path(marker: str):
     return style.get_path().transformed(style.get_transform())
 
 
-class _OverlayStyle:
-    """Colour / line-style / legend policy for a per-run waveform overlay.
+class _OverlayStyle(OverlayStyle):
+    """The figure's side of :class:`chipify.overlay_style.OverlayStyle`.
 
-    One implementation for both the XY overlays and the Bode plot, which
-    previously carried the same colour-and-legend logic in two copies.
-
-    Ungrouped, the behaviour is exactly what it has always been: colour encodes
-    the signal, or the run index when a single signal is selected, and a failing
-    run is drawn red. Grouped, colour encodes the *group value* so corners can
-    be told apart, line style encodes the signal, and pass/fail highlighting is
-    off — red would pull failing curves out of the very grouping that was asked
-    for.
+    The policy is shared with the TeX export; this adds what only the figure
+    needs: matplotlib's own viridis for the run shades and ``Line2D`` legend
+    handles.
     """
 
     def __init__(self, signals, run_ids, group_map=None, group_label="",
                  pass_map=None):
-        self.signals = list(signals)
-        self.group_label = group_label or ""
-        self.group_map = dict(group_map or {})
-        self.grouped = bool(self.group_map and self.group_label)
-        # Ignored while grouping: see the class docstring.
-        self.pass_map = {} if self.grouped else dict(pass_map or {})
-        self.single_signal = len(self.signals) == 1
-
-        n_sig = len(self.signals)
-        self.sig_color = {sig: category_color(i, n_sig)
-                          for i, sig in enumerate(self.signals)}
-
-        if self.grouped:
-            self.group_values = _dl.sort_group_values(
-                {self.group_map[r] for r in run_ids if r in self.group_map}
-            )
-            n_grp = len(self.group_values)
-            self.group_color = {v: category_color(i, n_grp)
-                                for i, v in enumerate(self.group_values)}
-            self.sig_style = {sig: _GROUP_LINESTYLES[i % len(_GROUP_LINESTYLES)]
-                              for i, sig in enumerate(self.signals)}
-            self.run_color = {}
-        else:
-            self.group_values = []
-            self.group_color = {}
-            self.sig_style = {sig: "-" for sig in self.signals}
-            if self.single_signal:
-                ordered = sorted(set(run_ids))
-                pal = plt.cm.viridis(np.linspace(0.1, 0.9, max(1, len(ordered))))
-                self.run_color = {rid: pal[i] for i, rid in enumerate(ordered)}
-            else:
-                self.run_color = {}
-
-    def is_fail(self, run_id) -> bool:
-        return self.pass_map.get(run_id, True) is False if self.pass_map else False
-
-    def color(self, run_id, sig):
-        if self.grouped:
-            return self.group_color.get(
-                self.group_map.get(run_id), self.sig_color[sig])
-        if self.is_fail(run_id):
-            return _FAIL_COLOR
-        if self.single_signal:
-            return self.run_color.get(run_id, self.sig_color[self.signals[0]])
-        return self.sig_color[sig]
-
-    def linestyle(self, sig) -> str:
-        return self.sig_style.get(sig, "-")
+        super().__init__(signals, run_ids, group_map=group_map,
+                         group_label=group_label, pass_map=pass_map,
+                         shade=plt.cm.viridis)
 
     def legend_handles(self) -> list:
-        handles = []
-        if self.grouped:
-            for val in self.group_values:
-                label = f"{self.group_label}={val}"
-                handles.append(Line2D([0], [0], color=self.group_color[val],
-                                      linewidth=1.5, label=label))
-            if len(self.signals) > 1:
-                for sig in self.signals:
-                    handles.append(Line2D([0], [0], color="gray", linewidth=1.5,
-                                          linestyle=self.sig_style[sig], label=sig))
-            return handles
-
-        if self.single_signal:
-            handles.append(Line2D([0], [0], color=plt.cm.viridis(0.1), linewidth=1.5,
-                                  label=f"{self.signals[0]}  (color = run index)"))
-        else:
-            for sig in self.signals:
-                handles.append(Line2D([0], [0], color=self.sig_color[sig],
-                                      linewidth=1.5, label=sig))
-        if self.pass_map and any(v is False for v in self.pass_map.values()):
-            handles.append(Line2D([0], [0], color=_FAIL_COLOR, linewidth=1.5,
-                                  label="Failing run"))
-        return handles
+        return [Line2D([0], [0], color=self.resolve(key), linewidth=1.5,
+                       linestyle=ls, label=label)
+                for key, ls, label in self.legend_entries()]
 
 
 class PlotManager:
@@ -243,13 +171,9 @@ class PlotManager:
         b = 'auto' if bins_val == "Auto" else int(bins_val)
         data_min, data_max = float('inf'), float('-inf')
         
-        if group_col != "None" and group_col in valid_df.columns:
-            # Sorted like every other grouped plot: data order legended a
-            # temperature sweep as 27, -40, 100.
-            unique_vals = _dl.sort_group_values(valid_df[group_col].dropna().unique())
-            groups = [(f"{group_col}={val}", valid_df[valid_df[group_col] == val][param].dropna()) for val in unique_vals]
-        else:
-            groups = [("Current Run", valid_df[param].dropna())]
+        # The same split, order and labels as the TeX export.
+        groups = [(label or "Current Run", values) for label, values
+                  in _dl.histogram_groups(valid_df, param, group_col)]
 
         for i, (grp_name, grp_data) in enumerate(groups):
             if grp_data.empty: continue
@@ -1098,7 +1022,8 @@ class PlotManager:
                 # what makes hovering there identify a run (see curve_hover).
                 # No `picker`: nothing handles pick events, yet matplotlib ran
                 # contains() on every picker curve per click (238 ms at 500).
-                ph_lines = ax_phase.plot(freq, df[ph_col], color=color, linestyle=ls,
+                ph_lines = ax_phase.plot(freq, continuous_phase(df[ph_col]),
+                                         color=color, linestyle=ls,
                                          alpha=alpha, linewidth=0.8,
                                          rasterized=(n_curves > 200))
                 if ph_lines:

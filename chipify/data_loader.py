@@ -277,6 +277,22 @@ def group_column(df: pd.DataFrame, group_col: str | None) -> str:
     return group_col
 
 
+def histogram_groups(rows: pd.DataFrame, param: str,
+                     group_col: str | None) -> list[tuple[str, pd.Series]]:
+    """The histogram's ``(label, values)`` per group, in legend order.
+
+    Grouped by *group_col*: one entry per value in :func:`sort_group_values`
+    order, labelled ``"<group>=<value>"``; rows without a group value are left
+    out, as the figure leaves them out. Ungrouped: one entry labelled ``""``.
+    Shared by the figure and the TeX export, which ignored the grouping.
+    """
+    group = group_column(rows, group_col)
+    if not group:
+        return [("", rows[param].dropna())]
+    return [(f"{group}={val}", rows.loc[rows[group] == val, param].dropna())
+            for val in sort_group_values(rows[group].dropna().unique())]
+
+
 def normalise_sim_error(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure ``sim_error`` column exists, is string-typed, and has no NaNs."""
     if "sim_error" not in df.columns:

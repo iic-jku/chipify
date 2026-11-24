@@ -218,15 +218,18 @@ class HistogramTab(QWidget):
         from chipify.gui_qt.services.latex_export import export_histogram_latex
         df = self._state.active_df
         param = self.param_combo.currentText()
-        data = None
+        data = group_series = None
         if df is not None and param and param != "-":
             stim = self._state.current_stim
             plot_df = _dl.plot_rows(df, stim, [param])
             if param in plot_df.columns:
                 data = plot_df[param].dropna()
+                group = _dl.group_column(plot_df, self.group_combo.currentText())
+                group_series = plot_df[group] if group else None
         bins_text = self.bins_combo.currentText()
         bins = "auto" if bins_text == "Auto" else int(bins_text)
-        export_histogram_latex(self, param, data, self.fit_combo.currentText(), bins)
+        export_histogram_latex(self, param, data, self.fit_combo.currentText(), bins,
+                               group_series=group_series)
 
     def _update_kpis(self, df, stim, param: str) -> None:
         data = _dl.plot_rows(df, stim, [param])[param].dropna()

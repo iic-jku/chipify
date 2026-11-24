@@ -2013,6 +2013,137 @@ def test_scatter_tex_export_is_the_same_file_from_both_windows(window, tmp_path,
     assert not at.btn_latex.isEnabled()
 
 
+def _ac_results(tmp_path):
+    """Results plus per-run AC CSVs whose phase is captured wrapped at ±180°."""
+    import numpy as np
+
+    f = np.logspace(0, 9, 60)
+    for i in range(3):
+        h = 100 / ((1 + 1j * f / (1e5 * (i + 1))) * (1 + 1j * f / 1e7)
+                   * (1 + 1j * f / 1e8))
+        pd.DataFrame({"frequency": f, "out_mag": np.abs(h),
+                      "out_phase": np.degrees(np.angle(h))}).to_csv(
+            tmp_path / f"run_{i:06d}__tb.csv", index=False)
+
+    class _Stim(_FakeStim):
+        def __init__(self):
+            super().__init__()
+            self.params = {"temp": [-40, 27, 100]}
+            self.tests[0].analyses = [
+                type("_An", (), {"kind": "ac", "signals": ["out"]})()
+            ]
+            self.equations = []
+            self.transient_equations = [{"name": "zero", "expr": "0"}]
+
+    df = pd.DataFrame({
+        "run_id": [0, 1, 2],
+        "temp": [-40, 27, 100],
+        "gain": [10.0, 10.2, 8.5],
+        "gain_pass": [True, True, False],
+        "global_pass": [True, True, False],
+        "sim_error": ["None"] * 3,
+    })
+    df.attrs["analysis_dirs"] = {"ac": str(tmp_path)}
+    return df, _Stim()
+
+
+def _no_dialogs(monkeypatch, tmp_path):
+    from chipify import settings
+    from chipify.gui_qt.services import latex_export
+    monkeypatch.setattr(settings, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(latex_export.QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(latex_export.QMessageBox, "critical", lambda *a, **k: None)
+
+
+def _tex_legend(text):
+    import re
+    return re.findall(r"\\addlegendentry\{(.*)\}", text)
+
+
+def test_grouped_bode_tex_is_grouped_and_the_same_from_both_windows(
+        window, tmp_path, monkeypatch):
+    """The reported bug: grouped by temp on screen, by run index in the .tex."""
+    from chipify.gui_qt.multiplot_window import PlotCell
+    _no_dialogs(monkeypatch, tmp_path)
+
+    df, stim = _ac_results(tmp_path)
+    window.show_results(df, stim, switch_tab=False)
+    pt = window.plots_tab
+    pt.kind_combo.setCurrentText("Bode")
+    pt._on_kind_change()
+    _select(pt.group_combo, "temp")
+    pt._redraw()
+    tab_legend = _legend(pt.canvas)
+    assert tab_legend == ["temp=-40", "temp=27", "temp=100"]
+    pt._export_latex()
+    tex = tmp_path / "latex" / "bode_plot.tex"
+    csv = tex.with_name("bode_plot.csv")
+    from_tab = (tex.read_text(encoding="utf-8"), csv.read_text(encoding="utf-8"))
+    assert _tex_legend(from_tab[0]) == tab_legend
+    assert "grouped by temp" in from_tab[0]
+    tex.unlink()
+    csv.unlink()
+
+    cell = PlotCell(window.app_state, window.plot_theme, lambda _c: None)
+    try:
+        _select(cell.mode_combo, "Plots")
+        cell._apply_mode_visibility()
+        cell.kind_combo.setCurrentText("Bode")
+        cell.redraw(*_snapshot(window))
+        _select(cell.group_combo, "temp")
+        cell.redraw(*_snapshot(window))
+        assert _legend(cell.canvas) == tab_legend
+        cell._export_latex()
+        assert (tex.read_text(encoding="utf-8"),
+                csv.read_text(encoding="utf-8")) == from_tab
+    finally:
+        cell.deleteLater()
+
+
+def test_grouped_histogram_tex_is_grouped_and_the_same_from_both_windows(
+        window, tmp_path, monkeypatch):
+    from chipify.gui_qt.multiplot_window import PlotCell
+    _no_dialogs(monkeypatch, tmp_path)
+
+    window.show_results(_sweep_df(), _SweepStim(), switch_tab=False)
+    h = window.histogram_tab
+    for combo, value in ((h.param_combo, "gain"), (h.group_combo, "temp"),
+                         (h.fit_combo, "Gauss (Normal)"), (h.bins_combo, "Auto")):
+        _select(combo, value)
+    h._redraw()
+    # The figure's legend also lists the spec limits, which the .tex lacks.
+    tab_groups = [t.get_text().split(" ")[0] for t in _legend_texts(h.canvas)
+                  if t.get_text().startswith("temp=")]
+    assert tab_groups == ["temp=-40", "temp=27", "temp=85"]
+    h._export_latex()
+    tex = tmp_path / "latex" / "gain_plot.tex"
+    csv = tex.with_name("gain_plot.csv")
+    from_tab = (tex.read_text(encoding="utf-8"), csv.read_text(encoding="utf-8"))
+    assert [e.split(" ")[0] for e in _tex_legend(from_tab[0])] == tab_groups
+    tex.unlink()
+    csv.unlink()
+
+    cell = PlotCell(window.app_state, window.plot_theme, lambda _c: None)
+    try:
+        _select(cell.mode_combo, "Histogram")
+        cell._apply_mode_visibility()
+        cell.redraw(*_snapshot(window))
+        for combo, value in ((cell.param_combo, "gain"), (cell.group_combo, "temp"),
+                             (cell.dist_combo, "Gauss (Normal)"),
+                             (cell.bins_combo, "Auto")):
+            _select(combo, value)
+        cell._export_latex()
+        assert (tex.read_text(encoding="utf-8"),
+                csv.read_text(encoding="utf-8")) == from_tab
+    finally:
+        cell.deleteLater()
+
+
+def _legend_texts(canvas):
+    ax = next(a for a in canvas.figure.axes if a.get_legend() is not None)
+    return ax.get_legend().get_texts()
+
+
 def test_dashboard_cell_offers_the_main_windows_exports(window, tmp_path,
                                                        monkeypatch):
     """A cell had no export at all: no PNG/SVG, no TeX, for any mode."""

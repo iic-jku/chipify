@@ -457,20 +457,28 @@ class PlotCell(QFrame):
         elif mode == "Histogram":
             df = self._state.active_df
             param = self.param_combo.currentText()
-            data = None
+            data = group_series = None
             if df is not None and param and param != "-":
                 plot_df = _dl.plot_rows(df, stim, [param])
                 if param in plot_df.columns:
                     data = plot_df[param].dropna()
+                    group = _dl.group_column(plot_df,
+                                             self.group_combo.currentText())
+                    group_series = plot_df[group] if group else None
             bins_text = self.bins_combo.currentText()
             bins = "auto" if bins_text == "Auto" else int(bins_text)
             _lx.export_histogram_latex(self, param, data,
-                                       self.dist_combo.currentText(), bins)
+                                       self.dist_combo.currentText(), bins,
+                                       group_series=group_series)
         else:  # Plots
             sel = self._waveform_selection(stim)
+            group_col = self._current_group()
             _lx.export_overlay_latex(self, sel["kind"], sel["adir"],
                                      sel["run_ids"], sel["signals"],
-                                     sel["equations"])
+                                     sel["equations"],
+                                     group_map=_tl.run_group_map(sel["df"],
+                                                                 group_col),
+                                     group_label=group_col)
 
     # ── Scatter / curve hover ─────────────────────────────────────────────────
 
